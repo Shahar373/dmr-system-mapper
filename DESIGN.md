@@ -345,10 +345,10 @@ belong to a **class** that carries the config weight and decay constant.
 |---|---|---|---|---|---|
 | `explicit_neighbor` | explicit | 0.90 | 1.0 if both sites announce each other, 0.65 one-way | `neighbor_site` (between carriers mapped to those sites) | Linked Cap+ `Adjacent Sites`, Con+ `Adjacent Sites`, Tier III `Adjacent_Site`, XPT adjacent |
 | `explicit_lcn_freq` | explicit | 0.95 | 1.0 | `same_site` | Tier III `Chan_Freq` / grants with absolute frequency naming this carrier |
-| `explicit_same_site` | explicit | 0.70 | 1.0 if same site number **and** same system code/net, 0.8 if same site number and same CC only (Cap+ has no system code) | `same_site` | Cap+ `SLCO Site`, Con+ `Net/Site`, Tier III sys parms, XPT site |
+| `explicit_same_site` | explicit | 0.70 | 1.0 if same site number **and** same system code/net, 0.85 when one side (a Tier III traffic channel) only knows Net/Site, 0.8 if same site number and same CC only (Cap+ has no system code), 0.9 for a shared XPT site | `same_site` | Cap+ `SLCO Site`, Con+ `Net/Site`, Tier III sys parms, XPT site |
 | `explicit_same_system` | explicit | 0.80 | 1.0 | `same_system` | same Tier III `SYS` code or Con+ Net ID on different sites |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
-| `behavioral_lsn_table` | behavioral | 0.60 | 1.0 | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
+| `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
 | `identity_radio` | identity | 0.30 | `min(1, shared_radios / 5)` | `same_system` | the same radio ID seen as `src` on both carriers within 24 h |
 | `identity_talkgroup` | identity | 0.15 | `min(1, shared_tgs / 3)` | `same_system` | the same TG on both carriers within 24 h (low: TG numbers are reused across unrelated systems) |
 | `rf_profile` | rf | 0.10 | correlation of activity-per-bucket profiles (Pearson over ≥ 24 shared buckets, clipped to 0..1), only when colour codes match | `same_system` | observations |
@@ -403,7 +403,19 @@ names the neighbour site, once the neighbour's carriers are known, would push it
 Systems and sites are derived after links: connected components of `same_site` links with
 score ≥ `possible` become sites; `same_system` and `neighbor_site` links join sites into systems.
 Explicit announcements (`site_number`, `sys_code`, `net_id`) label them. A site that is only
-announced by a neighbour exists with `directly_observed = 0` and no carriers.
+announced by a neighbour exists with `directly_observed = 0` and no carriers. `carrier_sites.lcn`
+is the Cap+ LCN learned from rest hops / LSN lists (`LCN = (LSN+1)//2`) or the Tier III LPCN from a
+`Chan_Freq` announcement. The tables are rebuilt on every `mapper correlate`; links and evidence
+persist and keep decaying, and `source = 'manual'` evidence is never touched by the automatic pass.
+
+Implementation (Phase 2): `dmr_mapper/correlate/` (`context.py` snapshot of carriers and their
+announcements, `evidence/*.py` collectors, `scoring.py`, `engine.py`, `derive.py`) and
+`dmr_mapper/export/` (`graph.py` NetworkX, `html.py` static map). Verified on synthetic
+multi-carrier logs (`tests/synth.py`): a three-repeater Cap+ site with coordinated rest hops comes
+out `probable` on explicit + behavioural evidence with the right LCNs; a Tier III control channel
+links its traffic channel `confirmed` through `Chan_Freq` and its neighbour site through
+bidirectional `Adjacent_Site`; two Tier II repeaters sharing six radios reach `possible` (capped,
+Tier II only); an unrelated Cap+ network reusing site number 2 is not linked.
 
 ## 6. What each DMR variant gives us
 

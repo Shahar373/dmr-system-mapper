@@ -54,7 +54,7 @@ investigation only.
 |---|---|---|
 | 0 | Sample inspection, DESIGN.md, CAPTURE.md, README, .gitignore, config example | done |
 | 1 | `mapper ingest <path>`: DSD-FME log and surveyor output → SQLite, with coverage report | done |
-| 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | planned |
+| 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | done |
 | 3 | Collector service for the Pi: survey, streaming decode, systemd, log rotation, nightly rsync, `deploy.sh` | planned |
 | 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
 
@@ -85,6 +85,29 @@ dsd-fme -fs -i tcp -o null -Z -D 0 2>&1 | mapper ingest - --freq 168863000   # l
 mapper ingest ... --json                                             # machine-readable report
 mapper status                                                        # table counts and carriers
 ```
+
+## Usage (Phase 2)
+
+```sh
+mapper correlate                         # run the evidence engine, derive sites and systems
+mapper correlate --now 2026-05-10T00:00:00Z --window-days 90   # replay old captures as if it were then
+mapper systems                           # systems → sites → carriers, then the links with scores
+mapper systems --min-label weak --json   # everything, machine-readable
+mapper explain 3                         # every evidence row behind link #3 and how it combines
+mapper explain 168500000 168512500       # the same, by frequencies
+mapper export                            # var/exports/map.html (static, single file, no CDN)
+mapper export --html map.html --graphml map.graphml --json-path map.json --min-label probable
+mapper propose 164300000 167137500 same_system 0.9 --note "heard the dispatcher on both"
+```
+
+The correlator collects nine evidence types (explicit site/system/neighbour/channel announcements,
+Capacity Plus rest-channel hops and LSN-list alignment, shared radio IDs and talkgroups, RF activity
+profiles), stores every row in `evidence`, combines them per link with noisy-OR after weight and
+time decay, and labels each link `confirmed` / `probable` / `possible` / `weak`. A link supported
+only by Tier II evidence is capped at 0.6 and marked `T2` in the map; `confirmed` needs explicit or
+manual evidence. `propose` records manual evidence that the automatic pass never overwrites or
+decays. Sites are connected components of `same_site` links, systems of `same_system` and
+`neighbor_site` links; sites named only in neighbour announcements appear as hollow diamonds.
 
 The database defaults to `var/mapper.db` (override with `--db` or `paths.db` in `config.local.yaml`).
 Every ingest prints a coverage report: bursts by type, colour codes, structural events (and how many
