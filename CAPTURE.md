@@ -22,8 +22,15 @@ installed on your machine (`AW 2026-26`, captured in
 
 ## 2. The collector command (Pi, Phase 3)
 
-One DSD-FME process per carrier being decoded, fed 48 kHz mono PCM over TCP by the collector's
-channelizer bridge, parsed as a stream, raw text discarded unless debugging:
+One DSD-FME process per carrier being decoded, fed 48 kHz mono PCM over TCP by the daemon's
+channelizer bridge. The daemon starts it itself and reads its stderr directly (one writer for all
+decoders); the command line is:
+
+```sh
+dsd-fme -fs -i tcp:127.0.0.1:7355 -o null -Z -D 0        # + -xr after an inverted-polarity retry
+```
+
+Piping a single DSD-FME into `mapper ingest - --stream` still works for a manual test:
 
 ```sh
 dsd-fme -fs -i tcp:127.0.0.1:7355 -o null -Z -D 0 2>&1 \

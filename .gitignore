@@ -43,3 +43,4 @@ build/
 .idea/
 .DS_Store
 Thumbs.db
+*.daemon.lock

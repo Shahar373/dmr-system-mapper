@@ -155,7 +155,7 @@ class FileSource:
         self._fh = self.path.open("rb")
 
     def tune(self, center_hz: float) -> None:
-        self.center_hz = float(center_hz)   # a recording cannot retune; callers see the same band
+        pass   # a recording cannot retune: center_hz stays the recording's, and callers must use it
 
     def describe(self) -> str:
         return f"replay {self.path.name} ({self._size / self.sample_rate:.1f} s at {self.sample_rate / 1e6:.2f} MS/s)"

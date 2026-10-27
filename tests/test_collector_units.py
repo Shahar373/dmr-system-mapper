@@ -168,6 +168,10 @@ def test_file_backend_replay(tmp_path, cfg):
     assert len(x) == 1_000_000 and x.dtype == np.complex64
     hits = analyse_block(x, 2.4e6, 165e6, 12_500, 0.8, 0.2, 9.0)
     assert any(h.freq_hz == 165_300_000 for h in hits)
+    # a sweep over the replay labels hits with the recording's centre, whatever the step centre
+    swept = sweep(fs, {"name": "r", "start_hz": 164_100_000, "stop_hz": 165_900_000, "raster_hz": 12_500},
+                  {**c, "survey": dict(c["survey"], dwell_s=0.2, segment_s=0.1)})
+    assert 165_300_000 in {h.freq_hz for h in swept}
     fs.close()
     c["sdr"]["replay"]["path"] = str(tmp_path / "missing.cf32")
     assert FileBackend(c).probe().status == "absent"

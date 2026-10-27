@@ -121,7 +121,8 @@ def sweep(source: IQSource, band: dict[str, Any], cfg: dict[str, Any], stop: Cal
         source.tune(c)
         source.read(int(source.sample_rate * 0.1))          # settle after retune
         x = source.read(int(source.sample_rate * dwell))
-        for h in analyse_block(x, source.sample_rate, c, raster, usable_fraction, segment, thr):
+        # label hits with the frequency the source actually reports (a replay cannot retune)
+        for h in analyse_block(x, source.sample_rate, source.center_hz, raster, usable_fraction, segment, thr):
             if int(band["start_hz"]) <= h.freq_hz <= int(band["stop_hz"]):
                 prev = hits.get(h.freq_hz)
                 if prev is None or h.snr_db > prev.snr_db:

@@ -67,12 +67,41 @@ class Daemon:
         self._store: Store | None = None
 
     # -- main loop ---------------------------------------------------------------------------------
+    def _acquire_lock(self) -> None:
+        """One daemon per database: an exclusive flock on ``<db>.daemon.lock``. The kernel drops it
+        when the process dies, so a crash never leaves a stale lock behind."""
+        import fcntl
+
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        fh = open(str(self.db_path) + ".daemon.lock", "a+")
+        try:
+            fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            holder = fh.read().strip() or "?"
+            fh.close()
+            raise RuntimeError(f"another daemon (pid {holder}) is already running on {self.db_path}")
+        fh.seek(0)
+        fh.truncate()
+        fh.write(str(self.pid))
+        fh.flush()
+        self._lock_fh = fh
+
+    def _release_lock(self) -> None:
+        fh = getattr(self, "_lock_fh", None)
+        if fh is not None:
+            import fcntl
+            fcntl.flock(fh, fcntl.LOCK_UN)
+            fh.close()
+            self._lock_fh = None
+
     def run(self) -> int:
-        self._store = Store(self.db_path)
-        existing = st.read_status(self._store, int((self.cfg.get("daemon", {}) or {}).get("heartbeat_stale_s", 10)))
-        if existing.alive and existing.pid != self.pid:
-            self._store.close()
-            raise RuntimeError(f"another daemon (pid {existing.pid}) is already running on {self.db_path}")
+        self._acquire_lock()
+        try:
+            self._store = Store(self.db_path)
+        except Exception:
+            self._release_lock()
+            raise
         self._install_signals()
         self.message = "started"
         try:
@@ -90,6 +119,7 @@ class Daemon:
             st.mark_offline(self._store, self.pid)
         finally:
             self._store.close()
+            self._release_lock()
         return 0
 
     def _install_signals(self) -> None:
@@ -310,7 +340,7 @@ class Daemon:
         base_port = int(dcfg.get("tcp_base_port", 7355))
         invert_after = float(dcfg.get("invert_retry_s", 10))
         source.tune(sl.center_hz)
-        chan = Channelizer(source.sample_rate, sl.center_hz)
+        chan = Channelizer(source.sample_rate, source.center_hz)
         freqs = [t.freq_hz for t in sl.targets]
         chan.set_channels(freqs)
         lines: "queue.Queue[tuple[int, str | None]]" = queue.Queue()

@@ -15,23 +15,20 @@ stands alone.
 ## Architecture
 
 ```
- Raspberry Pi 5 (1x SDRplay RSP1B, headless, Tailscale)
- ┌──────────────────────────────────────────────────────────────────────┐
- │ collector (systemd)                                                  │
- │   band survey ──► carrier list ──► 2 MHz slice + channelizer ──► dsd-fme ×4 │
- │                                        48 kHz PCM / TCP     │ stderr │
- │                                                             ▼        │
- │   streaming parser ──► aggregated events ──► SQLite (var/mapper.db) │
- │                                                             │        │
- │   correlator (periodic) ◄───────────────────────────────────┘        │
- │     explicit · behavioural · identity · rf evidence ──► links+score  │
- │                                                                      │
- │   MCP server (HTTP over Tailscale) ── scan_band · list_carriers ·    │
- │       decode_channel · get_fingerprint · query_systems · propose_link│
- └───────────────────────────┬──────────────────────────────────────────┘
-                             │ Tailscale                 nightly rsync of the DB
-                             ▼                                   ▼
-            Claude Code on the laptop (.mcp.json)          archive Pi
+ Raspberry Pi 5 (1x SDRplay RSP1B shared with other SDR services, headless, often on battery)
+ ┌──────────────────────────────────────────────────────────────────────────┐
+ │ mapper daemon (systemd, always running, holds NO receiver while idle)    │
+ │   command queue ◄── mapper tui (SSH) · mapper survey/decode (CLI) · MCP  │
+ │   session with a time budget, only when asked:                           │
+ │     survey: step the band, PSD per step ──► survey_hits                  │
+ │     decode: plan slices ──► 2.4 MS/s ──► FFT channelizer ──► dsd-fme ×N  │
+ │             48 kHz PCM / TCP │ stderr ──► one writer ──► SQLite          │
+ │   checks before each session: receiver present and free, power state    │
+ │   after a decode session: correlator ──► links + score + evidence        │
+ └───────────────────────────────┬──────────────────────────────────────────┘
+                                 │ Tailscale              nightly snapshot of the DB
+                                 ▼                                   ▼
+          SSH terminal (mapper tui), Claude Code (MCP, Phase 4)   archive Pi
 ```
 
 Deterministic code does all decoding (DSD-FME) and correlation. Claude's role through MCP is
@@ -56,7 +53,8 @@ investigation only.
 | 1 | `mapper ingest <path>`: DSD-FME log and surveyor output → SQLite, with coverage report | done |
 | 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | done |
 | 2.1 | Review fixes: site ids on the upsert path, live ingest commits per event, `correlate` output, `window_days` in config | done |
-| 3 | Collector service for the Pi: survey, streaming decode, systemd, log rotation, nightly rsync, `deploy.sh` | planned |
+| 3a | `mapper daemon` / `tui` / `survey` / `decode` / `doctor`: on-demand sessions with a time budget, band survey, FFT channelizer, DSD-FME decode, single-writer live ingest, Textual console | done |
+| 3b | Deployment on the Pi: systemd unit, `deploy.sh` (git pull on the Pi), nightly DB snapshot pulled by the archive Pi, first hardware run | planned |
 | 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
 
 Each phase ends with a commit to `main` and waits for approval.
@@ -64,7 +62,9 @@ Each phase ends with a commit to `main` and waits for approval.
 ## Requirements
 
 - Python 3.11+, SQLite (stdlib), `pyyaml`, `networkx`; `mcp` for Phase 4.
-- On the Pi: `dsd-fme` (build `AW 2026-26` or newer), SoapySDR with SoapySDRPlay3, `numpy`.
+- Collector and console: `numpy`, `scipy`, `textual` (`pip install -e '.[collector,tui]'`).
+- On the Pi: `dsd-fme` (build `AW 2026-26` or newer), SoapySDR with SoapySDRPlay3 and its Python
+  bindings. `mapper doctor` checks all of these.
 - Development is on Windows and in a cloud sandbox; the collector and MCP server run on Linux.
 
 Install for development:
@@ -124,6 +124,33 @@ Capacity Plus channel status / LSN lists / site / adjacent sites / preambles / c
 site, neighbours and grants, Tier III system parameters, C_BCAST broadcasts and grants, Hytera XPT
 site status, adjacent sites and free LCN, Tier II activity updates and LC headers, data headers,
 IP maps and LRRP (with position when present), plus radio IDs and talkgroups with their roles.
+
+## Usage (Phase 3a)
+
+The daemon runs all the time but touches the receiver only during a session you start. Every
+session has a time budget and releases the receiver when it ends, when you stop it, or when the
+firmware reports undervoltage. Before starting, it checks that the receiver is connected and not
+held by another program (`sdr.known_users`), and reads the power state to choose how many DSD-FME
+processes it can afford (fewer on battery).
+
+```sh
+mapper doctor                      # what is installed, is the receiver there, power, database
+mapper daemon                      # foreground; systemd runs this in Phase 3b
+mapper tui                         # the console, over SSH: s survey · d decode · x stop · c correlate · e export · q quit
+mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
+mapper survey --band uhf --then-decode
+mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: plan from the latest survey
+mapper stop
+mapper status                      # now also shows the daemon and the last sessions
+mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
+```
+
+A decode session plans from the latest survey: carriers never decoded, strong, stale, or of a
+variant that announces its identity come first, and carriers that look like the same Capacity Plus
+site and fit in one 1.9 MHz slice are decoded together with a double dwell, because that is what
+produces rest-hop evidence. After a decode session the correlator runs. Closing the console never
+stops a session. Development without hardware uses `sdr.source: file` (replay of an IQ recording)
+or the synthetic receiver in the tests.
 
 ## Samples (`samples/`)
 

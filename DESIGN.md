@@ -57,12 +57,45 @@ inspects evidence and may *propose* links; a proposal is just one more evidence 
 |---|---|---|---|
 | `mapper ingest` | laptop / Pi | 1 | Parse DSD-FME logs and surveyor output into SQLite |
 | `mapper correlate` / `systems` / `explain` / `export` | laptop / Pi | 2 | Evidence engine, reports, NetworkX + static HTML |
-| collector service | Pi (systemd) | 3 | Sequential band survey, DSD-FME decode per carrier, streaming ingest, log rotation, nightly rsync |
+| `mapper daemon` | Pi (systemd) | 3a | Idle until asked; survey and decode sessions with a time budget; single writer of decoded data |
+| `mapper tui` | Pi, over SSH | 3a | Operator console: status, start/stop, carriers, survey hits, systems, sessions |
+| deployment | Pi | 3b | systemd unit, `deploy.sh`, nightly DB snapshot for the archive Pi |
 | MCP server | Pi (HTTP over Tailscale) | 4 | Tools for Claude Code on the laptop |
 
-The collector and the CLI share one library (`dmr_mapper`) and one database. The correlator is a
-periodic job (systemd timer or in-process scheduler) and is also callable on demand from the CLI
-and MCP.
+The daemon, the console and the CLI share one library (`dmr_mapper`) and one database. The
+receiver is shared with other SDR services on the Pi, so nothing runs on a timer: work happens in
+**sessions** that an operator (console, CLI) or Claude (MCP) starts.
+
+### Daemon, sessions and the command queue (Phase 3a)
+
+- **One control channel.** Clients only insert rows into `commands` (`start_survey`, `start_decode`,
+  `stop`, `correlate`, `export`) and read `daemon_state` and `sessions`. The daemon claims commands
+  atomically, writes a heartbeat every tick, and is the only process that opens the receiver. A
+  console, the CLI and the MCP server therefore can never fight over the tuner.
+- **One daemon per database**, enforced by an `flock` on `<db>.daemon.lock` (released by the kernel
+  if the process dies).
+- **Before a session**: the receiver is probed (present / absent / busy, with the name of a running
+  program from `sdr.known_users`), `dsd-fme` must be found for a decode, and the power state is read.
+  A refusal is the command's result, shown in the console log.
+- **Power**: the state file of the Pi's power guard (`power.state_file`, read by meaning, not by
+  exact key names) or `vcgencmd get_throttled`. Not on a confirmed full supply → at most
+  `power.battery_max_instances` DSD-FME processes and `power.battery_session_s` by default;
+  undervoltage now → one process, and a running session is stopped.
+- **Session budget**: every session ends by itself; `stop` ends it at the next block. The receiver
+  is closed in every exit path.
+- **Survey**: steps of `sample_rate × usable_fraction` (1.92 MHz at 2.4 MS/s), Welch PSD per
+  `segment_s`, channel power on the raster, noise floor = median channel, hit when the 95th
+  percentile SNR clears `snr_threshold_db`; neighbours of a strong carrier are suppressed.
+  Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`).
+- **Decode**: the scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
+  variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
+  Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
+  FFT channelizer (overlap-save, 96 kHz per channel, 7.5 kHz low-pass, discriminator, 48 kHz int16,
+  slow level normalisation), one PCM TCP server and one DSD-FME per carrier, stderr of all of them
+  into one queue, parsed and written by the session thread, committed after every block so no
+  write lock is held. A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is
+  restarted with `-xr`. Survey SNR is copied into `observations.snr_db_*`.
+- **After a decode session** the correlator runs (`daemon.correlate_after_decode`).
 
 ### Time handling
 
@@ -279,7 +312,15 @@ CREATE TABLE survey_hits (
   PRIMARY KEY (run_id, freq_hz)
 );
 
-CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 2
+-- Phase 3a (migration 003): the daemon's control surface.
+CREATE TABLE daemon_state (id INTEGER PRIMARY KEY CHECK (id = 1), pid, started, heartbeat, mode,   -- idle|survey|decode|offline
+                           session_id, sdr, power, progress, message);                            -- JSON blobs
+CREATE TABLE sessions (id, kind, requested_by, params, budget_s, created, started, finished,
+                       status,                                                -- pending|running|done|stopped|failed
+                       summary);                                              -- JSON: hits, carriers, slices, errors
+CREATE TABLE commands (id, created, source, kind, params, status, taken_at, done_at, result);
+
+CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 3
 ```
 
 Migrations run inside one transaction each (`BEGIN … COMMIT`), so a failed migration leaves no
@@ -484,7 +525,9 @@ def build(store, min_label="possible") -> networkx.Graph   # nodes: carriers (+ 
 # dmr_mapper/export/html.py
 def write(graph, path)                                      # single static HTML, inline SVG + JS, no CDN
 
-# dmr_mapper/collector/   (Phase 3)   survey.py, channelizer.py, bridge.py (PCM→TCP), runner.py, rotate.py, archive.py
+# dmr_mapper/collector/   (Phase 3a)  state.py (queue), daemon.py, sdr.py (Soapy / file / synthetic), survey.py,
+#                         channelizer.py, bridge.py (PCM→TCP), decoder.py, ingest.py, scheduler.py, power.py
+# dmr_mapper/tui/app.py   (Phase 3a)  Textual console
 # dmr_mapper/mcp/server.py (Phase 4)
 ```
 
@@ -496,7 +539,7 @@ mapper correlate [--window DAYS] [--now ISO]
 mapper systems [--min-label possible] [--json]
 mapper explain <link-id | freqA freqB>
 mapper export [--html PATH] [--graphml PATH] [--min-label possible]
-mapper collect   (Phase 3, foreground; the systemd unit runs this)
+mapper daemon | tui | survey | decode | stop | doctor | capture-iq   (Phase 3a)
 mapper serve-mcp (Phase 4)
 ```
 
@@ -564,7 +607,7 @@ dmr_mapper/            package (phases 1–4)
   ingest/    dsdfme.py  surveyor.py  writer.py  events.py
   correlate/ engine.py  evidence/*.py  derive.py
   export/    graph.py  html.py
-  collector/ (Phase 3)   mcp/ (Phase 4)
+  collector/ (Phase 3a)  tui/ (Phase 3a)  mcp/ (Phase 4)
 tests/                 pytest, fixtures from samples/ + tests/fixtures/synthetic/
 samples/               checked-in DSD-FME logs (see README)
 deploy/                systemd units, deploy.sh, rsync (Phase 3)

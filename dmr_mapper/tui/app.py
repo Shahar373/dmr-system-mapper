@@ -111,7 +111,7 @@ class MapperApp(App[None]):
         with Horizontal():
             with Vertical(id="actions"):
                 yield Label("session minutes")
-                yield Input(placeholder="auto", id="budget")
+                yield Input(placeholder="auto", id="budget", type="integer")
                 yield Button("Survey (s)", id="survey", variant="primary")
                 yield Button("Decode (d)", id="decode", variant="primary")
                 yield Button("Stop (x)", id="stop", variant="error")
@@ -141,6 +141,8 @@ class MapperApp(App[None]):
         t.add_columns("#", "kind", "status", "by", "budget", "started", "elapsed", "summary")
         self.refresh_all()
         self.set_interval(REFRESH_S, self.refresh_all)
+        # start on the table, not in the minutes box, so the single-key shortcuts work at once
+        self.query_one("#carriers", DataTable).focus()
 
     def on_unmount(self) -> None:
         if self.store is not None:

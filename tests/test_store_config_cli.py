@@ -31,7 +31,7 @@ def test_example_config_loads_and_local_overrides(tmp_path, monkeypatch):
 def test_store_migrates_and_reopens(tmp_path):
     p = tmp_path / "m.db"
     with Store(p) as s:
-        assert s.schema_version() == 2
+        assert s.schema_version() == 3
         cid = s.upsert_carrier(168863000, 100)
         assert s.upsert_carrier(168863000, 50) == cid
     with Store(p, create=False) as s:
