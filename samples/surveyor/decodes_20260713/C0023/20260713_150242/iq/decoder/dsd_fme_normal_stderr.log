@@ -1,0 +1,301 @@
+ ██████╗  ██████╗██████╗     ███████╗███╗   ███╗███████╗
+ ██╔══██╗██╔════╝██╔══██╗    ██╔════╝████╗ ████║██╔════╝
+ ██║  ██║╚█████╗ ██║  ██║    █████╗  ██╔████╔██║█████╗  
+ ██║  ██║ ╚═══██╗██║  ██║    ██╔══╝  ██║╚██╔╝██║██╔══╝  
+ ██████╔╝██████╔╝██████╔╝    ██║     ██║ ╚═╝ ██║███████╗
+ ╚═════╝ ╚═════╝ ╚═════╝     ╚═╝     ╚═╝     ╚═╝╚══════╝
+Build Version: AW -128-NOTFOUND 
+MBElib Version: 1.3.4
+CODEC2 Support Enabled
+Decoding DMR BS/MS Simplex
+Audio In Device: /home/shahar/Projects/dmr-iq-surveyor/runs/20260713_163671500Hz/decodes/C0023/20260713_150242/iq/discriminator.wav
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=02 | _UNK 
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[31m
+ Protected Control Signalling Block(s)[0m[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[31m
+ Protected Control Signalling Block(s)[0m[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R34U 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R34U 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Group Data; Hash: 126;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Group Data; Hash: 126;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[31m SLCO CRC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[31m
+ Protected Control Signalling Block(s)[0m[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[31m
+ Protected Control Signalling Block(s)[0m[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R12U 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R12U 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 126;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | CSBK[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 73;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | DATA[0m[31m (CRC ERR) [0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R12U 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m Activity Update TS1: Idle; Hash: 0; TS2: Ind Data; Hash: 126;[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | R12U 
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1   slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[31m SLCO CRC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[31m SLCO CRC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] [31m| CACH/Burst FEC ERR[0m
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[31m SLCO CRC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[33m SLCO NULL [0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+[31m SLCO CRC ERR[0m
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR  [slot1]  slot2  | Color Code=07 | IDLE 
+19:58:40 Sync: +DMR   slot1  [slot2] | Color Code=07 | IDLE 
+
+End of /home/shahar/Projects/dmr-iq-surveyor/runs/20260713_163671500Hz/decodes/C0023/20260713_150242/iq/discriminator.wav
+
+Total audio errors: 0
+Total header errors: 0
+Total irrecoverable header errors: 0
+Exiting.

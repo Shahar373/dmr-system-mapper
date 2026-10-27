@@ -1,0 +1,67 @@
+{
+  "tool": "dmr-iq-surveyor",
+  "input_path": "/home/shahar/Documents/SDRconnect_IQ_20260713_150256_163671500HZ.wav",
+  "output_dir": "/home/shahar/Projects/dmr-iq-surveyor/runs/20260713_163671500Hz/decodes/C0017/20260713_150256/iq",
+  "candidate_id": "C0017",
+  "recording_id": "20260713_150256",
+  "candidate_frequency_hz": 165625000.0,
+  "recording_center_frequency_hz": 163671500,
+  "frequency_offset_hz": 1953500.0,
+  "iq_order": "IQ",
+  "iq_order_confidence": "assumed_from_SDRconnect_channel_convention_not_proven_from_statistics",
+  "input_sample_rate_hz": 10000000,
+  "input_duration_seconds": 11.2001792,
+  "output_sample_rate_hz": 48000,
+  "output_duration_seconds": 11.1901875,
+  "wav_path": "/home/shahar/Projects/dmr-iq-surveyor/runs/20260713_163671500Hz/decodes/C0017/20260713_150256/iq/discriminator.wav",
+  "settings": {
+    "chunk_frames": 1000000,
+    "first_decimation": 10,
+    "second_decimation": 10,
+    "first_filter_taps": 401,
+    "second_filter_taps": 801,
+    "channel_filter_taps": 161,
+    "first_cutoff_hz": 400000,
+    "second_cutoff_hz": 40000,
+    "channel_lowpass_hz": 7500,
+    "output_rate_hz": 48000,
+    "trim_seconds": 0.005,
+    "normalization_percentile": 99.5,
+    "output_peak_fraction": 0.9,
+    "preview_samples": 100000
+  },
+  "metrics": {
+    "input_sample_count": 112001792,
+    "intermediate_sample_count": 1120018,
+    "discriminator_sample_count_before_resample": 1119017,
+    "output_sample_count": 537129,
+    "intermediate_rate_hz": 100000,
+    "output_rate_hz": 48000,
+    "frequency_offset_hz": 1953500.0,
+    "trim_samples_each_side_intermediate": 500,
+    "filter_taps": {
+      "first": 401,
+      "second": 801,
+      "channel": 161
+    }
+  },
+  "normalization": {
+    "center_removed": 0.0068784961476922035,
+    "normalization_reference": 0.1949767556414008,
+    "absolute_peak_reference": 0.6943820705637336,
+    "percentile_scale": 151250.33701062424,
+    "peak_safe_scale": 42469.846573167306,
+    "scale": 42469.846573167306,
+    "limiter_applied": true,
+    "would_clip_without_limiter": 6,
+    "clipped_samples": 0,
+    "peak_pcm": 29490
+  },
+  "warnings": [
+    "The data chunk declares 448007204 bytes but only 448007168 are available",
+    "Center frequency was missing from container metadata and was derived from the filename"
+  ],
+  "elapsed_seconds": 14.20422911643982,
+  "peak_rss_bytes": 714276864,
+  "python": "3.13.5"
+}
