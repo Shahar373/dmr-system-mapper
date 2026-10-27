@@ -48,6 +48,7 @@ ingest:
 
 correlator:
   interval_minutes: 30
+  window_days: 30             # evidence collectors look back this far (mapper correlate --window-days)
   weights:                     # see DESIGN.md "Evidence"
     explicit_neighbor: 0.90
     explicit_lcn_freq: 0.95

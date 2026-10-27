@@ -7,8 +7,8 @@
 * sites that are only *announced* (neighbour lists naming a site number no carrier reports) exist
   with ``directly_observed = 0`` and no carriers, so the graph can show them as hollow nodes.
 
-Tables ``systems``/``sites``/``carrier_sites`` are rebuilt on every run, except rows with
-``created_by = 'manual'`` which are preserved by label.
+Tables ``systems``/``sites``/``carrier_sites`` are rebuilt on every run. Manual knowledge lives in
+``evidence`` rows with ``source = 'manual'`` (see ``engine.propose``), never in these tables.
 """
 
 from __future__ import annotations
@@ -63,10 +63,6 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
         for s in comp:
             system_of[s] = idx
 
-    # preserve manual labels
-    manual_sys = {r["label"]: dict(r) for r in store.rows("SELECT * FROM systems WHERE created_by = 'manual'")}
-    manual_sites = {(r["system_id"], r["site_number"]): dict(r) for r in store.rows("SELECT * FROM sites")}
-
     store.conn.execute("DELETE FROM carrier_sites")
     store.conn.execute("DELETE FROM sites")
     store.conn.execute("DELETE FROM systems")
@@ -88,12 +84,16 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
             first = min(ctx.carriers[c].first_seen for c in members)
             last = max(ctx.carriers[c].last_seen for c in members)
             site_label = _site_label(ctx, members, variant, site_number)
-            cur = store.conn.execute(
+            # Two same_site components of one system may announce the same site number (a carrier
+            # that could not be linked to its siblings): they share one site row. RETURNING gives the
+            # row's id on both the insert and the update path; cursor.lastrowid does not (it keeps
+            # the id of the previous insert when the conflict branch runs).
+            row = store.conn.execute(
                 "INSERT INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen) VALUES (?, ?, ?, ?, 1, ?, ?)"
-                " ON CONFLICT(system_id, site_number) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = MIN(first_seen, excluded.first_seen)",
-                (sys_id, site_number, site_label, cc, first, last))
-            site_id = int(cur.lastrowid) if cur.lastrowid else int(store.scalar(
-                "SELECT id FROM sites WHERE system_id = ? AND site_number IS ?", (sys_id, site_number)))
+                " ON CONFLICT(system_id, site_number) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = MIN(first_seen, excluded.first_seen)"
+                " RETURNING id",
+                (sys_id, site_number, site_label, cc, first, last)).fetchone()
+            site_id = int(row[0])
             site_db_ids[s] = site_id
             comp_conf = _component_confidence(links, members) if len(members) > 1 else 1.0
             for cid in members:

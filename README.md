@@ -55,6 +55,7 @@ investigation only.
 | 0 | Sample inspection, DESIGN.md, CAPTURE.md, README, .gitignore, config example | done |
 | 1 | `mapper ingest <path>`: DSD-FME log and surveyor output → SQLite, with coverage report | done |
 | 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | done |
+| 2.1 | Review fixes: site ids on the upsert path, live ingest commits per event, `correlate` output, `window_days` in config | done |
 | 3 | Collector service for the Pi: survey, streaming decode, systemd, log rotation, nightly rsync, `deploy.sh` | planned |
 | 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
 

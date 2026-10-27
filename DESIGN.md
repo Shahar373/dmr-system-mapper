@@ -505,7 +505,7 @@ mapper serve-mcp (Phase 4)
 `config.example.yaml` is committed; `config.local.yaml` (git-ignored) is deep-merged over it.
 Lookup order: `--config PATH`, `$DMR_MAPPER_CONFIG`, `./config.local.yaml`, `./config.example.yaml`.
 Keys: `paths`, `timezone`, `sdr`, `survey.bands[]`, `survey.*`, `decode.*`, `ingest.bucket_minutes`,
-`correlator.{weights,decay_days,labels,tier2_max_confidence,interval_minutes}`, `archive.*`, `mcp.*`.
+`correlator.{weights,decay_days,labels,tier2_max_confidence,interval_minutes,window_days}`, `archive.*`, `mcp.*`.
 See the example file for every key and its meaning. Machine-specific values (Tailscale address,
 device serials, archive host, band plans) are only ever set in `config.local.yaml`.
 

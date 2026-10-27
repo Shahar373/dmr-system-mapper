@@ -61,8 +61,9 @@ def ingest_lines(
 
     File mode (``live=False``): one transaction for the whole file, so an interrupted ingest leaves
     nothing behind (``Store.__exit__`` rolls back) and the next run starts clean.
-    Live mode: closed buckets and identities are flushed and committed every ``flush_every_s``
-    seconds and on SIGTERM, so a killed collector loses at most the open bucket.
+    Live mode: structural events are committed as soon as they are written (so no write lock is
+    held between flushes); closed buckets and identities are flushed and committed every
+    ``flush_every_s`` seconds and on SIGTERM, so a killed collector loses at most the open bucket.
     """
     if ctx.freq_hz is None:
         raise ValueError("carrier frequency is required (use --freq or a dsd_fme_<freqHz>_<date>_<time>.log name)")
@@ -90,6 +91,11 @@ def ingest_lines(
                 byte_counter[0] += len(raw.encode("utf-8", errors="replace"))
             for ev in parser.feed(raw):
                 agg.feed(ev)
+            if live and store.conn.in_transaction:
+                # Structural events are written as they arrive. Commit them at once: a live
+                # transaction held open until the next flush would block every other writer
+                # (other decoders, the correlator) for up to flush_every_s seconds.
+                store.commit()
             if live and time.monotonic() - last_flush >= flush_every_s:
                 agg.flush(partial_before=int(time.time()))
                 store.commit()

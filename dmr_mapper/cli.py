@@ -89,7 +89,8 @@ def cmd_correlate(args: argparse.Namespace) -> int:
         print(json.dumps(rep.to_dict(), indent=2))
         return 0
     print(f"correlated {rep.carriers} carriers over the last {rep.window_days} days")
-    print("evidence collected: " + ", ".join(f"{k}={v}" for k, v in rep.evidence_collected.items() if v) or "evidence collected: none")
+    collected = ", ".join(f"{k}={v}" for k, v in rep.evidence_collected.items() if v)
+    print(f"evidence collected: {collected or 'none'}")
     print(f"links scored: {rep.links_scored}  " + "  ".join(f"{k}={v}" for k, v in sorted(rep.links_by_label.items())))
     print(f"sites: {rep.sites}  systems: {rep.systems}")
     return 0
