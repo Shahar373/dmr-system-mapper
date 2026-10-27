@@ -1,0 +1,11 @@
+12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK
+ Hytera XPT Site Status - Free LCN: 3 SN: 1
+ LCN 1 - LSN 01: ST-0 Idle; LSN 02: ST-0 Idle; 
+ LCN 2 - LSN 03: ST-2 Priv; LSN 04: ST-3 Null; 
+12:00:00 Sync: +DMR   slot1  [slot2] | Color Code=01 | CSBK
+ Hytera XPT CSBK 0x0B - SN: 1
+ XPT Adjacent Site:2 Free:1; Site:3 Free:4; 
+12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK
+ SLCO Hytera XPT - Free LCN 3 - PRI LCN 1 - PRI HASH: 2A
+12:00:01 Sync: +DMR   slot1  [slot2] | Color Code=01 | VLC  
+ SLOT 2 TGT=101 SRC=2001 Hytera XPT Group Call Free LCN 3; 

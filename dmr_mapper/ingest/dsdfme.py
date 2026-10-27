@@ -1,0 +1,577 @@
+"""Streaming parser for DSD-FME console output (stderr).
+
+The parser is a small state machine over lines:
+
+* a ``Sync:`` line opens a burst and flushes any pending multi-line CSBK;
+* payload lines (indented, after ANSI stripping) are matched against an ordered table;
+* a few records span several lines (Cap+ channel status + LSN list, adjacent-site lists,
+  Tier III broadcasts, grants, XPT status) and are collected in ``pending`` until the next
+  burst or a new record starts.
+
+Line formats come from the DSD-FME source (``dmr_csbk.c``, ``dmr_flco.c``, ``dmr_bs.c``) and
+from ``samples/``; see CAPTURE.md §4.
+"""
+
+from __future__ import annotations
+
+import re
+from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterable, Iterator
+from zoneinfo import ZoneInfo
+
+from .events import Burst, Event, Meta, NoSync, Quality, Structural, Unrecognized
+
+ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\(.)")
+
+FILENAME_RE = re.compile(r"dsd_fme_(?P<freq>\d{5,12})_(?P<date>\d{8})_(?P<time>\d{6})", re.IGNORECASE)
+
+
+def strip_ansi(line: str) -> str:
+    return ANSI_RE.sub("", line)
+
+
+def parse_log_filename(name: str, tz: ZoneInfo | None = None) -> tuple[int | None, datetime | None]:
+    """``dsd_fme_<freq>_<YYYYmmdd>_<HHMMSS>.log`` → (freq_hz, local start time).
+
+    A frequency below 1 000 000 is taken as kHz (the first sample log uses kHz)."""
+    m = FILENAME_RE.search(Path(name).name)
+    if not m:
+        return None, None
+    freq = int(m.group("freq"))
+    if freq < 1_000_000:
+        freq *= 1000
+    start = datetime.strptime(m.group("date") + m.group("time"), "%Y%m%d%H%M%S")
+    if tz is not None:
+        start = start.replace(tzinfo=tz)
+    return freq, start
+
+
+@dataclass
+class ParseContext:
+    freq_hz: int | None = None
+    start_time: datetime | None = None   # tz-aware; date source for HH:MM:SS lines
+    source: str = "dsdfme_log"
+    time_is_rf: bool = True              # False: line clocks are decode wall-clock, use offsets
+    tz: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
+
+
+# --------------------------------------------------------------------------------------------
+# Regular expressions
+# --------------------------------------------------------------------------------------------
+
+SYNC_RE = re.compile(
+    r"^(?P<clock>\d{2}:\d{2}:\d{2}) Sync:\s*(?P<pol>[+-]?)(?P<proto>[A-Za-z0-9_]+)\s*(?P<rest>.*)$"
+)
+SLOT_RE = re.compile(r"(?P<b1>\[?)\s*(?:SLOT1|slot1)\s*\]?\s+(?P<b2>\[?)\s*(?:SLOT2|slot2)\s*\]?\s*(?P<tail>.*)$")
+CC_KIND_RE = re.compile(r"\|\s*Color Code=(?P<cc>\d{2}|XX)\s*\|\s*(?P<kind>\S+)?\s*(?P<flags>.*)$")
+NO_SYNC_RE = re.compile(r"^(?:\d{2}:\d{2}:\d{2} )?Sync: no sync")
+
+# Capacity Plus
+CAP_STATUS_RE = re.compile(
+    r"Capacity Plus Channel Status - FL: (?P<fl>\d+) TS: (?P<ts>\d+) RS: (?P<rs>\d+) - Rest LSN: (?P<rest>\d+)"
+    r"(?: - (?P<block>\w+) Block)?"
+)
+CAP_BANK_RE = re.compile(r"Bank (?P<bank>One|Two) (?P<flag>F[0-9A-Fa-f]+) (?P<desc>.+?) Call\(s\)\s*-\s*(?P<rest>.*)$")
+LSN_STATE_RE = re.compile(r"LSN (?P<lsn>\d+):\s*(?:ST-\w\s*)?(?P<state>Rest|Idle|Priv|Null|Unk|\d+);")
+LSN_TGT_RE = re.compile(r"LSN (?P<lsn>\d+): TGT (?P<tg>\d+);")
+CAP_SITE_RE = re.compile(r"SLCO Capacity Plus Site: (?P<site>\d+) - Rest LSN: (?P<rest>\d+) - RS: (?P<rs>\w+)")
+CAP_ADJ_HDR_RE = re.compile(r"Capacity Plus Adjacent Sites")
+CAP_ADJ_SITE_RE = re.compile(r"Site: (?P<site>\d+) Rest: (?P<rest>\d+);")
+CAP_REST_CHANGE_RE = re.compile(r"Cap\+ Rest LSN Change: (?P<rest>\d+); (?P<reason>.*)$")
+PREAMBLE_RE = re.compile(
+    r"Preamble CSBK - (?P<addr>Individual|Group) (?P<kind>Data|CSBK|Voice) - Source: (?P<src>\d+) - Target: (?P<tgt>\d+)"
+    r"(?: - Rest LSN: (?P<rest>\d+))?"
+)
+CALL_RE = re.compile(r"SLOT (?P<slot>\d) TGT=(?P<tgt>\d+) SRC=(?P<src>\d+)\s*(?P<desc>.*)$")
+CALL_REST_RE = re.compile(r"Rest LSN: (?P<rest>\d+)")
+CALL_FREE_LCN_RE = re.compile(r"Free LCN (?P<lcn>\d+)")
+
+# Connect Plus
+CON_SYS_RE = re.compile(r"SLCO Connect Plus (?P<role>Control|Traffic) Channel - Net ID: (?P<net>\d+) Site ID: (?P<site>\d+)")
+CON_ADJ_RE = re.compile(r"Connect Plus Adjacent Sites:\s*(?P<list>.*)$")
+CON_VGRANT_RE = re.compile(
+    r"Connect Plus (?P<kind>Group|Private|Unknown \w+) Voice Channel Grant; Target: (?P<tgt>\d+); Source: (?P<src>\d+);"
+    r" LCN: (?P<lcn>\d+); TS: (?P<ts>\d+);"
+)
+CON_DGRANT_RE = re.compile(r"Connect Plus Data Channel Grant; Target: (?P<tgt>\d+); LCN: (?P<lcn>\d+); TS: (?P<ts>\d+);")
+CON_TERM_RE = re.compile(r"Connect Plus Slot Termination|Con\+ Slot \d Termination")
+
+# Tier III
+T3_SYS_RE = re.compile(
+    r"(?P<src>C_ALOHA_SYS_PARMS|SLC_C_SYS_PARMS|SLC_P_SYS_PARMS): (?P<model>\w+); Net ID: (?P<net>\d+); Site ID: (?P<site>\d+)(?:\.(?P<sub>\d+))?;"
+    r"(?: Cat: (?P<cat>[^;]+);)?(?: Reg Req: (?P<reg>\d+);)?(?: CSC: (?P<csc>\d+);)?(?: Comp CC: (?P<compcc>\d+);)?(?: SYS: (?P<sys>[0-9A-Fa-f]{4});)?"
+)
+T3_BCAST_RE = re.compile(r"Announcements \(C_BCAST\)\s*(?P<what>.*)$")
+T3_BCAST_TYPES = {
+    "Ann_WD_TSCC": "ann_wd_tscc", "CallTimer_Parms": "call_timer", "Vote_Now": "vote_now", "Local_Time": "local_time",
+    "MassReg": "mass_reg", "Chan_Freq": "chan_freq", "Adjacent_Site": "adjacent_site", "Gen_Site_Params": "gen_site_params",
+}
+T3_GRANT_RE = re.compile(r"(?P<what>(?:Private|Talkgroup|Broadcast|Duplex Private) (?:Voice|Data) Channel Grant[^(]*)\((?P<code>\w+)\)")
+T3_GRANT_DETAIL_RE = re.compile(r"LPCN: (?P<lpcn>\d+); TS: (?P<ts>\d+); LPCN\+TS: (?P<lpcnts>\d+); Target: (?P<tgt>\d+) - Source: (?P<src>\d+)")
+T3_FREQ_RE = re.compile(r"Frequency: (?P<mhz>[\d.]+) MHz")
+T3_ONLINE_RE = re.compile(r"\b(?P<state>Online|Offline);")
+T3_PRI_RE = re.compile(r"CC Pri: (?P<cc>\d+); AC Pri: (?P<ac>\d+);")
+T3_LPCN_RE = re.compile(r"\bLPCN: (?P<lpcn>\d+|Null);")
+T3_APCN_RE = re.compile(r"APCN: (?P<apcn>\d+);")
+T3_RX_RE = re.compile(r"RX Base: (?P<base>\d+); RX Step: (?P<step>\d+); RX Freq: (?P<freq>\d+);")
+T3_TX_RE = re.compile(r"TX Base: (?P<base>\d+); TX Step: (?P<step>\d+); TX Freq: (?P<freq>\d+);")
+T3_SYSCODE_RE = re.compile(r"\bSYS: (?P<sys>[0-9A-Fa-f]{4});")
+T3_ADJ_ID_RE = re.compile(r"^(?P<model>\w+); Net ID: (?P<net>\d+); Site ID: (?P<site>\d+)(?:\.(?P<sub>\d+))?;")
+T3_ALOHA_MISC_RE = re.compile(r"Reg Window: |Aloha Mask: |Timers - |C_AHOY|Channel Timing CSBK|Reg: \d+; Backoff:")
+
+# Hytera XPT
+XPT_STATUS_RE = re.compile(r"Hytera XPT Site Status - Free LCN: (?P<free>\d+) SN: (?P<sn>\d+)")
+XPT_LCN_RE = re.compile(r"LCN (?P<lcn>\d+) - ")
+XPT_ADJ_HDR_RE = re.compile(r"Hytera XPT CSBK 0x0B - SN: (?P<sn>\d+)")
+XPT_ADJ_SITE_RE = re.compile(r"Site:(?P<site>\d+) Free:(?P<free>\d+);")
+XPT_SLCO_RE = re.compile(r"SLCO Hytera XPT - Free LCN (?P<free>\d+) - PRI LCN (?P<pri>\d+) - PRI HASH: (?P<hash>\w+)")
+XPT_TUNE_RE = re.compile(r"LSN/TG to tune to|Tune to Freq|Dont Tune Freq")
+
+# Common / Tier II
+ACTIVITY_RE = re.compile(r"Activity Update TS1: (?P<ts1>[^;]+); Hash: (?P<h1>\d+);(?: TS2: (?P<ts2>[^;]+); Hash: (?P<h2>\d+);)?")
+MOTO_DATA_RE = re.compile(r"Moto Data Channel: (?P<op>[0-9A-Fa-f]+); (?P<bytes>(?:[0-9A-Fa-f]{2} ?)+)")
+SLCO_NULL_RE = re.compile(r"^SLCO NULL")
+SLCO_CRC_RE = re.compile(r"^SLCO CRC ERR")
+SLCO_OTHER_RE = re.compile(r"^SLCO (?:Cap Max Activity Update; TGT: (?P<tgt>\d+);|Caltta: (?P<caltta>\w+);|Unknown - (?P<unk>\d+)|Completed Block)")
+LC_RE = re.compile(r"SLOT (?P<slot>\d) (?P<kind>Protected|Unknown) LC\s+FLCO=(?P<flco>0x[0-9A-Fa-f]+) FID=(?P<fid>0x[0-9A-Fa-f]+)")
+ERR_LINE_RE = re.compile(r"FLCO FEC ERR|SB/RC \(FEC ERR\)|Protected Control Signalling Block|Multi Block PDU Message CRC32 ERR|CRC32 ERR|VOICE CACH/EMB ERR|CACH/Burst FEC ERR|\(CRC ERR\)\s*$|Frame Sync Err")
+DATA_HDR_RE = re.compile(r"Slot (?P<slot>\d) Data Header - (?P<addr>Indiv|Group) - (?P<delivery>.+?) - Source: (?P<src>\d+) Target: (?P<tgt>\d+)")
+DATA_MISC_RE = re.compile(r"^(?:S[Ll][Oo][Tt] \d Data Terminator|UTF8 Text: |UTF16 Text: |ARS; |P25p2 LCH |SAP \d+ |UDP Protocol;|TXI Op:|DATA RESP TGT: (?P<rtgt>\d+); SRC: (?P<rsrc>\d+)|Multi Block PDU|Hytera PDU ENC Header|Motorola Network Interface Service Header|SLOT \d SB/RC)")
+IP_MAP_RE = re.compile(r"(?P<role>SRC|DST)\((?P<bits>\d+)\): 0*(?P<radio>\d+); IP: (?P<ip>[\d.]+); Port: (?P<port>\d+);")
+LRRP_RE = re.compile(r"LRRP SRC: (?P<src>\d+); (?P<dir>Request from|Response to) TGT: (?P<tgt>\d+);")
+LATLON_RE = re.compile(r"Lat: (?P<lat>-?\d+\.\d+) Lon: (?P<lon>-?\d+\.\d+)")
+
+META_RE = re.compile(
+    r"^(?:Build Version: (?P<build>.*)|MBElib Version: (?P<mbe>.*)|CODEC2 Support Enabled|Low  Pass Filter|Audio In(?:/Out)? Device: (?P<audio>.*)|Decoding DMR|Pulse Input Device|"
+    r"End of (?P<end>.*)|Total audio errors: (?P<aerr>\d+)|Total header errors: (?P<herr>\d+)|Total irrecoverable header errors: (?P<ierr>\d+)|Exiting\.|"
+    r"\d{2}:\d{2}:\d{2}\s+P25|[█╚╔║╗╝═]+|Usage: dsd-fme|Decoding Mode:|Using .* as input|Frequency: .* Hz|Gain: |Squelch: )"
+)
+UNKNOWN_CSBK_RE = re.compile(r"Unknown CSBK|CSBK Opcode|MFID: |Opcode: ")
+
+# Which pending records accept which continuation lines
+_PENDING_KINDS_WITH_LSN = {"capplus_channel_status", "xpt_site_status"}
+
+
+def _bucket_hex(bytes_str: str) -> str:
+    return " ".join(bytes_str.split()[:3])
+
+
+class LineParser:
+    """Stateful line-by-line parser. Call ``feed(line)`` per line, ``finish()`` at EOF."""
+
+    def __init__(self, ctx: ParseContext):
+        self.ctx = ctx
+        self._date_anchor: datetime | None = None   # tz-aware datetime of the current day's 00:00:00
+        self._last_clock_s: int | None = None       # seconds since midnight of the last sync line
+        self._first_clock_s: int | None = None
+        self._ts: int | None = None                 # epoch of the last sync line
+        self._slot: int | None = None
+        self._cc: int | None = None
+        self._pending: Structural | None = None
+        self.lines = 0
+        self.parsed = 0
+        self.unrecognized = 0
+
+    # -- time ----------------------------------------------------------------------------------
+    def _resolve_time(self, clock: str) -> int:
+        h, m, s = (int(x) for x in clock.split(":"))
+        clock_s = h * 3600 + m * 60 + s
+        if self._first_clock_s is None:
+            self._first_clock_s = clock_s
+        start = self.ctx.start_time
+        if start is None:
+            start = datetime.now(tz=self.ctx.tz)
+        if start.tzinfo is None:
+            start = start.replace(tzinfo=self.ctx.tz)
+        if not self.ctx.time_is_rf:
+            # decode-time clock: only the offset from the first line matters
+            offset = clock_s - self._first_clock_s
+            if offset < 0:
+                offset += 86400
+            self._last_clock_s = clock_s
+            return int((start + timedelta(seconds=offset)).timestamp())
+        if self._date_anchor is None:
+            local_start = start.astimezone(self.ctx.tz)
+            self._date_anchor = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
+            # if the first line clock is far before the start-of-file clock, assume same day anyway
+        if self._last_clock_s is not None and clock_s < self._last_clock_s - 3600:
+            self._date_anchor += timedelta(days=1)   # midnight rollover
+        self._last_clock_s = clock_s
+        return int((self._date_anchor + timedelta(seconds=clock_s)).timestamp())
+
+    # -- pending records -------------------------------------------------------------------------
+    def _flush(self) -> Iterator[Event]:
+        if self._pending is not None:
+            ev = self._pending
+            self._pending = None
+            if ev.kind == "capplus_channel_status":
+                self._finalize_channel_status(ev)
+            elif ev.kind == "capplus_adjacent" and not ev.payload["sites"]:
+                ev.payload["sites"] = []
+            yield ev
+
+    @staticmethod
+    def _finalize_channel_status(ev: Structural) -> None:
+        states = ev.payload.setdefault("lsn_states", {})
+        bank = ev.payload.get("bank")
+        private_targets = set((bank or {}).get("lsn_to_tg", {}).values())
+        for lsn, state in states.items():
+            if state not in ("rest", "idle") and isinstance(state, int):
+                kind = "radio" if state in private_targets else "tg"
+                ev.identities.append((kind, state, "lsn_active"))
+
+    def _open(self, kind: str, payload: dict[str, Any], **kw: Any) -> Iterator[Event]:
+        yield from self._flush()
+        self._pending = Structural(ts=self._ts or 0, kind=kind, payload=payload, slot=self._slot, cc=self._cc, **kw)
+
+    def _event(self, kind: str, payload: dict[str, Any], identities: list[tuple[str, int, str]] | None = None) -> Structural:
+        return Structural(ts=self._ts or 0, kind=kind, payload=payload, slot=self._slot, cc=self._cc, identities=identities or [])
+
+    # -- main entry -------------------------------------------------------------------------------
+    def feed(self, raw: str) -> Iterator[Event]:
+        self.lines += 1
+        line = strip_ansi(raw).rstrip("\r\n")
+        stripped = line.strip()
+        if not stripped:
+            return
+
+        if NO_SYNC_RE.match(stripped):
+            yield from self._flush()
+            self.parsed += 1
+            yield NoSync(self._ts)
+            return
+
+        m = SYNC_RE.match(stripped)
+        if m:
+            yield from self._flush()
+            yield from self._burst(m)
+            return
+
+        handled = yield from self._payload(stripped)
+        if handled:
+            self.parsed += 1
+        else:
+            self.unrecognized += 1
+            yield Unrecognized(self._ts, stripped[:200])
+
+    def finish(self) -> Iterator[Event]:
+        yield from self._flush()
+
+    # -- burst lines ------------------------------------------------------------------------------
+    def _burst(self, m: re.Match[str]) -> Iterator[Event]:
+        self.parsed += 1
+        self._ts = self._resolve_time(m.group("clock"))
+        if m.group("proto").upper() != "DMR":
+            yield Burst(self._ts, m.group("pol"), None, None, "OTHER_PROTO", False, m.group(0)[:120])
+            return
+        rest = m.group("rest")
+        slot: int | None = None
+        cc: int | None = None
+        kind = "ERR"
+        crc = False
+        sm = SLOT_RE.match(rest)
+        tail = rest
+        if sm:
+            if sm.group("b1"):
+                slot = 1
+            elif sm.group("b2"):
+                slot = 2
+            tail = sm.group("tail")
+        km = CC_KIND_RE.search(tail)
+        if km:
+            cc = None if km.group("cc") == "XX" else int(km.group("cc"))
+            kind = (km.group("kind") or "----").rstrip()
+            crc = "CRC ERR" in km.group("flags") or "FEC ERR" in km.group("flags")
+        else:
+            crc = "ERR" in tail
+            kind = "ERR"
+        self._slot = slot
+        if cc is not None:
+            self._cc = cc
+        yield Burst(self._ts, m.group("pol"), slot, cc, kind, crc, tail.strip()[:120])
+
+    # -- payload lines ----------------------------------------------------------------------------
+    def _payload(self, s: str) -> Iterator[Event]:
+        """Yield events for a non-sync line. Returns True (via StopIteration value) when recognised."""
+        p = self._pending
+
+        # --- continuation lines for pending multi-line records -------------------------------
+        if p is not None:
+            if p.kind in _PENDING_KINDS_WITH_LSN and (bm := CAP_BANK_RE.search(s)):
+                p.payload["bank"] = {
+                    "bank": bm.group("bank"), "flag": bm.group("flag"), "desc": bm.group("desc"),
+                    "lsn_to_tg": {int(x.group("lsn")): int(x.group("tg")) for x in LSN_TGT_RE.finditer(bm.group("rest"))},
+                }
+                for tg in p.payload["bank"]["lsn_to_tg"].values():
+                    p.identities.append(("radio", tg, "private_or_data"))
+                return True
+            if p.kind in _PENDING_KINDS_WITH_LSN and LSN_STATE_RE.search(s) and "TGT" not in s:
+                states = p.payload.setdefault("lsn_states", {})
+                lcn_m = XPT_LCN_RE.search(s)
+                if lcn_m and p.kind == "xpt_site_status":
+                    p.payload.setdefault("lcns", []).append(int(lcn_m.group("lcn")))
+                for x in LSN_STATE_RE.finditer(s):
+                    st = x.group("state")
+                    states[int(x.group("lsn"))] = int(st) if st.isdigit() else st.lower()
+                return True
+            if p.kind == "capplus_adjacent" and CAP_ADJ_SITE_RE.search(s):
+                p.payload["sites"].extend(
+                    {"site": int(x.group("site")), "rest_lsn": int(x.group("rest"))} for x in CAP_ADJ_SITE_RE.finditer(s)
+                )
+                return True
+            if p.kind == "xpt_adjacent" and (XPT_ADJ_SITE_RE.search(s) or s.startswith("XPT Adjacent")):
+                p.payload["sites"].extend(
+                    {"site": int(x.group("site")), "free": int(x.group("free"))} for x in XPT_ADJ_SITE_RE.finditer(s)
+                )
+                return True
+            if p.kind == "tier3_bcast":
+                if self._t3_detail(p, s):
+                    return True
+            if p.kind == "grant":
+                if gm := T3_GRANT_DETAIL_RE.search(s):
+                    p.payload.update(lpcn=int(gm.group("lpcn")), ts=int(gm.group("ts")), lpcn_ts=int(gm.group("lpcnts")),
+                                     tgt=int(gm.group("tgt")), src=int(gm.group("src")))
+                    p.identities.append(("radio", int(gm.group("src")), "src"))
+                    p.identities.append(("tg" if p.payload.get("kind") == "group" else "radio", int(gm.group("tgt")), "tgt"))
+                    return True
+                if fm := T3_FREQ_RE.search(s):
+                    p.payload["freq_hz"] = int(round(float(fm.group("mhz")) * 1_000_000))
+                    return True
+                if s.startswith("Frequency Not Found") or s.startswith("MBC Channel Grant") or s.startswith("Invalid Channel"):
+                    return True
+            if p.kind == "lrrp" and (lm := LATLON_RE.search(s)):
+                p.payload["lat"] = float(lm.group("lat"))
+                p.payload["lon"] = float(lm.group("lon"))
+                return True
+            if p.kind in ("tier3_bcast", "grant", "tier3_sys_parms") and (sm := T3_SYSCODE_RE.search(s)):
+                p.payload["sys_code"] = sm.group("sys").upper()
+                return True
+
+        # --- Capacity Plus -----------------------------------------------------------------------
+        if m := CAP_STATUS_RE.search(s):
+            yield from self._open("capplus_channel_status", {
+                "fl": int(m.group("fl")), "ts": int(m.group("ts")), "rs": int(m.group("rs")),
+                "rest_lsn": int(m.group("rest")), "block": (m.group("block") or "Single").lower(), "lsn_states": {},
+            })
+            return True
+        if m := CAP_SITE_RE.search(s):
+            yield self._event("capplus_site", {"site": int(m.group("site")), "rest_lsn": int(m.group("rest")), "rs": m.group("rs")})
+            return True
+        if CAP_ADJ_HDR_RE.search(s):
+            yield from self._open("capplus_adjacent", {"sites": []})
+            # sites may follow on the same line (defensive)
+            self._pending.payload["sites"].extend(
+                {"site": int(x.group("site")), "rest_lsn": int(x.group("rest"))} for x in CAP_ADJ_SITE_RE.finditer(s)
+            )
+            return True
+        if CAP_BANK_RE.search(s) or (LSN_STATE_RE.search(s) and "TGT" not in s):
+            return True   # orphan channel-list line (its header was lost); nothing to attach it to
+        if m := CAP_REST_CHANGE_RE.search(s):
+            yield self._event("capplus_rest_change", {"rest_lsn": int(m.group("rest")), "reason": m.group("reason").strip()})
+            return True
+        if m := PREAMBLE_RE.search(s):
+            src, tgt = int(m.group("src")), int(m.group("tgt"))
+            ids = [("radio", src, "src"), ("radio" if m.group("addr") == "Individual" else "tg", tgt, "tgt")]
+            yield self._event("preamble", {
+                "addressing": m.group("addr").lower(), "kind": m.group("kind").lower(), "src": src, "tgt": tgt,
+                "rest_lsn": int(m.group("rest")) if m.group("rest") else None,
+            }, ids)
+            return True
+        if m := CALL_RE.search(s):
+            desc = m.group("desc")
+            if "Call" in desc or "XPT" in desc or "Hytera" in desc:
+                src, tgt = int(m.group("src")), int(m.group("tgt"))
+                is_group = "Group" in desc or "Broadcast" in desc
+                payload: dict[str, Any] = {
+                    "slot": int(m.group("slot")), "src": src, "tgt": tgt, "group": is_group,
+                    "capplus": "Cap+" in desc, "txi": "TXI" in desc, "xpt": "XPT" in desc, "desc": desc.strip(),
+                }
+                if rm := CALL_REST_RE.search(desc):
+                    payload["rest_lsn"] = int(rm.group("rest"))
+                if fm := CALL_FREE_LCN_RE.search(desc):
+                    payload["free_lcn"] = int(fm.group("lcn"))
+                ids = []
+                if src:
+                    ids.append(("radio", src, "src"))
+                if tgt:
+                    ids.append(("tg" if is_group else "radio", tgt, "tgt"))
+                yield self._event("call", payload, ids)
+                return True
+
+        # --- Connect Plus ------------------------------------------------------------------------
+        if m := CON_SYS_RE.search(s):
+            yield self._event("conplus_sys", {"role": m.group("role").lower(), "net_id": int(m.group("net")), "site_id": int(m.group("site"))})
+            return True
+        if m := CON_ADJ_RE.search(s):
+            sites = [int(x) for x in re.findall(r"\d+", m.group("list"))]
+            yield self._event("conplus_adjacent", {"sites": sites})
+            return True
+        if m := CON_VGRANT_RE.search(s):
+            kind = m.group("kind").lower()
+            kind = "group" if kind == "group" else "private" if kind == "private" else "unknown"
+            src, tgt = int(m.group("src")), int(m.group("tgt"))
+            yield self._event("grant", {
+                "variant": "conplus", "kind": kind, "tgt": tgt, "src": src, "lcn": int(m.group("lcn")), "ts": int(m.group("ts")),
+            }, [("radio", src, "src"), ("tg" if kind == "group" else "radio", tgt, "tgt")])
+            return True
+        if m := CON_DGRANT_RE.search(s):
+            tgt = int(m.group("tgt"))
+            yield self._event("grant", {"variant": "conplus", "kind": "data", "tgt": tgt, "lcn": int(m.group("lcn")), "ts": int(m.group("ts"))},
+                              [("radio", tgt, "tgt")])
+            return True
+        if CON_TERM_RE.search(s):
+            return True
+
+        # --- Tier III ----------------------------------------------------------------------------
+        if m := T3_SYS_RE.search(s):
+            payload = {
+                "source": m.group("src").lower(), "model": m.group("model"), "net_id": int(m.group("net")),
+                "site_id": int(m.group("site")), "sub_site": int(m.group("sub")) if m.group("sub") else None,
+                "sys_code": m.group("sys").upper() if m.group("sys") else None, "cat": m.group("cat"),
+                "reg": int(m.group("reg")) if m.group("reg") else None, "csc": int(m.group("csc")) if m.group("csc") else None,
+            }
+            yield from self._open("tier3_sys_parms", payload)
+            return True
+        if m := T3_BCAST_RE.search(s):
+            what = m.group("what")
+            a_type = "other"
+            for token, name in T3_BCAST_TYPES.items():
+                if token in what:
+                    a_type = name
+                    break
+            yield from self._open("tier3_bcast", {"a_type": a_type, "text": what.strip()})
+            return True
+        if m := T3_GRANT_RE.search(s):
+            what = m.group("what")
+            kind = "data" if "Data" in what else ("group" if "Talkgroup" in what or "Broadcast" in what else "private")
+            yield from self._open("grant", {"variant": "tier3", "kind": kind, "code": m.group("code")})
+            return True
+        if T3_ALOHA_MISC_RE.search(s):
+            return True
+
+        # --- Hytera XPT ---------------------------------------------------------------------------
+        if m := XPT_STATUS_RE.search(s):
+            yield from self._open("xpt_site_status", {"free_lcn": int(m.group("free")), "sn": int(m.group("sn")), "lsn_states": {}})
+            return True
+        if m := XPT_ADJ_HDR_RE.search(s):
+            yield from self._open("xpt_adjacent", {"sn": int(m.group("sn")), "sites": []})
+            self._pending.payload["sites"].extend(
+                {"site": int(x.group("site")), "free": int(x.group("free"))} for x in XPT_ADJ_SITE_RE.finditer(s)
+            )
+            return True
+        if m := XPT_SLCO_RE.search(s):
+            yield self._event("xpt_slco", {"free_lcn": int(m.group("free")), "pri_lcn": int(m.group("pri")), "pri_hash": m.group("hash")})
+            return True
+        if XPT_TUNE_RE.search(s):
+            return True
+
+        # --- Common / Tier II ----------------------------------------------------------------------
+        if m := ACTIVITY_RE.search(s):
+            yield self._event("activity_update", {
+                "ts1": m.group("ts1").strip(), "hash1": int(m.group("h1")),
+                "ts2": m.group("ts2").strip() if m.group("ts2") else None, "hash2": int(m.group("h2")) if m.group("h2") else None,
+            })
+            return True
+        if m := MOTO_DATA_RE.search(s):
+            yield self._event("moto_data_channel", {"opcode": m.group("op").upper(), "bytes": m.group("bytes").strip().upper()})
+            return True
+        if SLCO_NULL_RE.match(s):
+            yield Quality(self._ts, "slco_null")
+            return True
+        if SLCO_CRC_RE.match(s):
+            yield Quality(self._ts, "slco_crc")
+            return True
+        if m := SLCO_OTHER_RE.match(s):
+            yield self._event("slco_other", {"text": s[:80]})
+            return True
+        if m := LC_RE.search(s):
+            yield self._event("protected_lc", {"slot": int(m.group("slot")), "lc": m.group("kind").lower(), "flco": m.group("flco").upper(), "fid": m.group("fid").upper(),
+                                               "crc_err": "CRC ERR" in s})
+            return True
+        if m := DATA_HDR_RE.search(s):
+            src, tgt = int(m.group("src")), int(m.group("tgt"))
+            yield self._event("data_header", {
+                "slot": int(m.group("slot")), "addressing": m.group("addr").lower(), "delivery": m.group("delivery").strip(),
+                "src": src, "tgt": tgt, "response_requested": "Response Requested" in s,
+            }, [("radio", src, "data"), ("radio" if m.group("addr") == "Indiv" else "tg", tgt, "data")])
+            return True
+        if m := IP_MAP_RE.search(s):
+            radio = int(m.group("radio"))
+            yield self._event("ip_map", {"role": m.group("role").lower(), "radio": radio, "ip": m.group("ip"), "port": int(m.group("port"))},
+                              [("radio", radio, "data")])
+            return True
+        if m := LRRP_RE.search(s):
+            src, tgt = int(m.group("src")), int(m.group("tgt"))
+            yield from self._open("lrrp", {"src": src, "tgt": tgt, "direction": "request" if m.group("dir").startswith("Request") else "response",
+                                           "lat": None, "lon": None}, identities=[("radio", src, "lrrp"), ("radio", tgt, "lrrp")])
+            return True
+        if LATLON_RE.search(s):
+            return True   # position without a preceding LRRP record: nothing to attach to
+        if m := DATA_MISC_RE.match(s):
+            if m.group("rtgt"):
+                yield self._event("data_response", {"tgt": int(m.group("rtgt")), "src": int(m.group("rsrc")), "text": s[:80]},
+                                  [("radio", int(m.group("rsrc")), "data"), ("radio", int(m.group("rtgt")), "data")])
+            return True
+        if ERR_LINE_RE.search(s):
+            yield Quality(self._ts, "crc_err")
+            return True
+        if m := META_RE.match(s):
+            key = next((k for k, v in m.groupdict().items() if v is not None), "banner")
+            yield Meta(self._ts, key, (m.groupdict().get(key) or s)[:200])
+            return True
+        if UNKNOWN_CSBK_RE.search(s):
+            yield self._event("unknown_csbk", {"text": s[:120]})
+            return True
+        return False
+
+    # -- Tier III broadcast continuation ------------------------------------------------------------
+    @staticmethod
+    def _t3_detail(p: Structural, s: str) -> bool:
+        hit = False
+        if m := T3_ONLINE_RE.search(s):
+            p.payload["online"] = m.group("state") == "Online"
+            hit = True
+        if m := T3_PRI_RE.search(s):
+            p.payload["cc_pri"] = int(m.group("cc"))
+            p.payload["ac_pri"] = int(m.group("ac"))
+            hit = True
+        if m := T3_LPCN_RE.search(s):
+            p.payload["lpcn"] = None if m.group("lpcn") == "Null" else int(m.group("lpcn"))
+            hit = True
+        if m := T3_APCN_RE.search(s):
+            p.payload["apcn"] = int(m.group("apcn"))
+            hit = True
+        if m := T3_RX_RE.search(s):
+            p.payload["rx_freq_hz"] = int(m.group("freq"))
+            p.payload["rx_base_hz"] = int(m.group("base"))
+            p.payload["rx_step_hz"] = int(m.group("step"))
+            hit = True
+        if m := T3_TX_RE.search(s):
+            p.payload["tx_freq_hz"] = int(m.group("freq"))
+            hit = True
+        if m := T3_ADJ_ID_RE.match(s):
+            p.payload["adj_model"] = m.group("model")
+            p.payload["adj_net_id"] = int(m.group("net"))
+            p.payload["adj_site_id"] = int(m.group("site"))
+            p.payload["adj_sub_site"] = int(m.group("sub")) if m.group("sub") else None
+            hit = True
+        if m := T3_SYSCODE_RE.search(s):
+            p.payload["sys_code"] = m.group("sys").upper()
+            hit = True
+        if "Active Connection Information Not Available" in s or s.startswith("Res: "):
+            hit = True
+        return hit
+
+
+def parse_lines(lines: Iterable[str], ctx: ParseContext) -> Iterator[Event]:
+    """Parse an iterable of raw DSD-FME lines into events (streaming)."""
+    parser = LineParser(ctx)
+    for raw in lines:
+        yield from parser.feed(raw)
+    yield from parser.finish()
+
+
+def utc_now() -> datetime:
+    return datetime.now(tz=timezone.utc)

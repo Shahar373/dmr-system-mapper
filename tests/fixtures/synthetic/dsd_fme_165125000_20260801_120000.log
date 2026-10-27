@@ -1,0 +1,23 @@
+12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK
+ C_ALOHA_SYS_PARMS: Small; Net ID: 1; Site ID: 7; SYS: 1A2B;
+  SYS: 1A2B; Reg: 1; Backoff: 3; BParms1: 0000; BParms2: 000000;
+12:00:00 Sync: +DMR   slot1  [slot2] | Color Code=09 | CSBK
+ Announcements (C_BCAST) Adjacent Site Information (Adjacent_Site)
+  Online; CC Pri: 1; AC Pri: 2; LPCN: 1234;
+  Small; Net ID: 1; Site ID: 8; SYS: 1A2B;
+12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK
+ Announcements (C_BCAST) Announce Logical Channel/Frequency Relationship (Chan_Freq)
+ APCN: 0410; RX Base: 160000000; RX Step: 12500; RX Freq: 165125000;
+             TX Base: 165000000; TX Step: 12500; TX Freq: 170125000;
+12:00:01 Sync: +DMR   slot1  [slot2] | Color Code=09 | CSBK
+ Talkgroup Voice Channel Grant (TV_GRANT)
+  LPCN: 0012; TS: 1; LPCN+TS: 0023; Target: 00000101 - Source: 00002001 
+  Frequency: 165.125000 MHz
+12:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK
+ Announcements (C_BCAST) General Site Parameters (Gen_Site_Params)
+  SYS: 1A2B; Reg: 1; Backoff: 3; BParms1: 0000; BParms2: 000000;
+12:00:02 Sync: +DMR   slot1  [slot2] | Color Code=09 | CSBK
+ SLC_C_SYS_PARMS: Small; Net ID: 1; Site ID: 7; Reg Req: 1;
+12:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK
+ Announcements (C_BCAST) Vote Now Advice (Vote_Now)
+  Online; CC Pri: 0; AC Pri: 0; LPCN: Null;

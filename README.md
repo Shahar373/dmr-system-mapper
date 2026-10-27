@@ -53,7 +53,7 @@ investigation only.
 | Phase | Deliverable | Status |
 |---|---|---|
 | 0 | Sample inspection, DESIGN.md, CAPTURE.md, README, .gitignore, config example | done |
-| 1 | `mapper ingest <path>`: DSD-FME log and surveyor output → SQLite, with coverage report | planned |
+| 1 | `mapper ingest <path>`: DSD-FME log and surveyor output → SQLite, with coverage report | done |
 | 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | planned |
 | 3 | Collector service for the Pi: survey, streaming decode, systemd, log rotation, nightly rsync, `deploy.sh` | planned |
 | 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
@@ -66,13 +66,38 @@ Each phase ends with a commit to `main` and waits for approval.
 - On the Pi: `dsd-fme` (build `AW 2026-26` or newer), SoapySDR with SoapySDRPlay3, `numpy`.
 - Development is on Windows and in a cloud sandbox; the collector and MCP server run on Linux.
 
-Install for development (from Phase 1 on):
+Install for development:
 
 ```sh
 python -m venv .venv && . .venv/bin/activate      # Windows: .venv\Scripts\activate
 pip install -e '.[dev]'
 pytest
 ```
+
+## Usage (Phase 1)
+
+```sh
+mapper ingest samples/capplus/dsd_fme_168863_20260509_163344.log   # one DSD-FME log (freq + start from the name)
+mapper ingest samples/surveyor                                       # a dmr-iq-surveyor decode tree
+mapper ingest captures/ --force                                      # a directory of logs, re-ingest even if seen
+mapper ingest some.log --freq 451237500 --start 2026-08-01T12:00:00+03:00
+dsd-fme -fs -i tcp -o null -Z -D 0 2>&1 | mapper ingest - --freq 168863000   # live stream
+mapper ingest ... --json                                             # machine-readable report
+mapper status                                                        # table counts and carriers
+```
+
+The database defaults to `var/mapper.db` (override with `--db` or `paths.db` in `config.local.yaml`).
+Every ingest prints a coverage report: bursts by type, colour codes, structural events (and how many
+rows survived de-duplication), rest-channel transitions, identities, the variant guess, parsers that
+have no real capture yet (`untested_on_air`), and every unrecognized line pattern with an example, so a
+new DSD-FME build shows up as a short list rather than silent loss. Files already ingested (same path,
+size and mtime) are skipped unless `--force` is given.
+
+What ingest extracts from a log: burst header per frame (colour code, slot, burst type, CRC state),
+Capacity Plus channel status / LSN lists / site / adjacent sites / preambles / calls, Connect Plus
+site, neighbours and grants, Tier III system parameters, C_BCAST broadcasts and grants, Hytera XPT
+site status, adjacent sites and free LCN, Tier II activity updates and LC headers, data headers,
+IP maps and LRRP (with position when present), plus radio IDs and talkgroups with their roles.
 
 ## Samples (`samples/`)
 

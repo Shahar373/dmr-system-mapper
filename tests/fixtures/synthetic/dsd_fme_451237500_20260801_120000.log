@@ -1,0 +1,16 @@
+ ██████╗  ██████╗██████╗     ███████╗███╗   ███╗███████╗
+Build Version: AW 2026-26-synthetic 
+12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=05 | CSBK
+ SLCO Connect Plus Control Channel - Net ID: 3 Site ID: 12
+12:00:00 Sync: +DMR   slot1  [slot2] | Color Code=05 | CSBK
+ Connect Plus Adjacent Sites: 11; 13; 14;
+12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=05 | CSBK
+ Connect Plus Group Voice Channel Grant; Target: 101; Source: 2001; LCN: 4; TS: 2;
+12:00:01 Sync: +DMR   slot1  [slot2] | Color Code=05 | CSBK
+ Connect Plus Data Channel Grant; Target: 2002; LCN: 5; TS: 1;
+12:00:02 Sync: +DMR  [slot1]  slot2  | Color Code=05 | CSBK
+ Connect Plus Adjacent Sites: None Listed;
+12:00:02 Sync: +DMR   slot1  [slot2] | Color Code=05 | CSBK
+ Connect Plus Slot Termination;
+12:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=05 | TLC  
+ SLOT 1 TGT=101 SRC=2001 Group Call  

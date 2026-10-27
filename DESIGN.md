@@ -280,11 +280,13 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 - `capplus_channel_status`: stored only when the **rest LSN changes** or the **LSN list changes**
   (new TG on an LSN, LSN leaving Idle). Unchanged repeats increment `count`/`last_ts` on the open
   row. Rest LSN changes also create a `rest_events` row.
-- `capplus_adjacent`, `conplus_adjacent`, `tier3_adjacent`, `tier3_chan_freq`, `tier3_sys_parms`,
-  `conplus_sys`, `xpt_site_status`, `xpt_adjacent`: one row per distinct `payload` per carrier per
-  UTC day, with `count` incremented on repeats.
-- `preamble`, `data_header`, `lrrp`, `grant`: one row per distinct `(slot, payload)` per carrier
-  per hour.
+- `capplus_site`, `capplus_adjacent`, `conplus_adjacent`, `conplus_sys`, `tier3_bcast`,
+  `tier3_sys_parms`, `xpt_site_status`, `xpt_adjacent`, `xpt_slco`, `moto_data_channel`: one row per
+  distinct `payload` per carrier per UTC day, with `count` incremented on repeats.
+- `preamble`, `data_header`, `ip_map`, `lrrp`, `grant`, `activity_update`, `protected_lc`,
+  `capplus_rest_change`: one row per distinct payload per carrier per hour.
+- `call` (voice/data call start from the LC: slot, src, tgt): one row per minute, so the
+  `behavioral_lsn_table` evidence can align calls with LSN lists.
 - Voice frames, IDLE, `SLCO NULL`, CRC errors are **never** stored as events; they only feed
   `observations` counters.
 
@@ -305,6 +307,7 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 | `xpt_site_status` | `free_lcn, sn, lcn, lsn_states` |
 | `xpt_adjacent` | `sn, sites[{site, free}]` |
 | `xpt_slco` | `free_lcn, pri_lcn, pri_hash` |
+| `call` | `slot, src, tgt, group, capplus, txi, xpt, rest_lsn, free_lcn, desc` (from `SLOT n TGT= SRC= … Call`) |
 | `activity_update` | `ts1, hash1, ts2, hash2` (Tier II fingerprint; stored per distinct payload per hour) |
 | `moto_data_channel` | `opcode, bytes` (stored per distinct bytes[0:3] prefix per day) |
 | `data_header` | `slot, addressing, delivery, src, tgt, response_requested` |
@@ -395,6 +398,10 @@ parser. Summary of what the correlator can use:
 | Con+ | `Site ID` | `Net ID` | `Connect Plus Adjacent Sites` | LCN from grants; frequency only via observation |
 | Tier III | `Site ID` (+ sub-site; `-D 0` shows full ID) | `SYS` code, `Net ID` | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
 | XPT | `XPT Adjacent Site:n` | — | `XPT Adjacent` | `Free LCN`, LSN status list |
+
+Phase 1 result on `samples/`: 0 unrecognized lines on all 16 logs; the Cap+ capture yields 9 245
+channel-status CSBKs (105 rows after de-duplication), 149 adjacent-site CSBKs (2 rows), 46
+rest-channel transitions, 25 LRRP responses and 12 identities, in a 200 KB database.
 
 Only Cap+ (three sites) and Tier II are present in `samples/`. Con+, Tier III and XPT parsers are
 written from the DSD-FME source print formats and unit-tested on synthetic lines; they are flagged
