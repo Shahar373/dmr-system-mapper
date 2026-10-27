@@ -1,0 +1,45 @@
+# Databases (the mapper's SQLite file lives under var/)
+*.db
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+
+# Raw RF / audio captures (never committed; the collector never keeps them)
+*.wav
+*.iq
+*.npz
+*.zip
+*.bin
+samples/raw/
+# One checked-in DSD-FME regression fixture is kept on purpose
+!samples/surveyor/decodes_20260713/C0013/20260713_150256/iq/discriminator.wav
+
+# Machine-specific configuration (Tailscale addresses, users, paths, band plans)
+config.local.yaml
+
+# Pi runtime output: SQLite, raw-log rotation, exports, survey captures
+var/
+data/
+captures/
+logs/
+*.log.[0-9]*
+*.log.gz
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+dist/
+build/
+
+# Editors / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db

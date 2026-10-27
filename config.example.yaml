@@ -1,0 +1,81 @@
+# dmr-system-mapper configuration template.
+#
+# Copy to config.local.yaml (git-ignored) and override only what differs on your machine.
+# config.local.yaml is deep-merged on top of this file: nested keys you do not set keep
+# their defaults. Paths are relative to the repository root unless absolute.
+
+paths:
+  db: var/mapper.db            # the only persistent store; tens of MB for months of data
+  raw_logs: var/raw            # DSD-FME raw logs, only written when decode.keep_raw_logs is true
+  exports: var/exports         # graph exports (HTML, GraphML, JSON)
+
+timezone: Asia/Jerusalem       # display only; the database stores UTC epoch seconds
+
+sdr:
+  driver: sdrplay              # SoapySDR driver name (SoapySDRPlay3)
+  devices:                     # 2x RSP1B on the Pi; serials from `SoapySDRUtil --find`
+    - {serial: "", role: survey}   # wideband sweeps
+    - {serial: "", role: decode}   # narrowband decode of selected carriers
+  sample_rate_hz: 2000000      # survey capture rate (RSP1B: 2-10.66 MS/s continuous)
+  gain:
+    ifgr: 40                   # IF gain reduction (dB)
+    lna_state: 3               # RFGR / LNA state
+    agc: false
+
+survey:
+  bands:
+    - {name: vhf-high, start_hz: 160000000, stop_hz: 174000000, raster_hz: 12500}
+    - {name: uhf,      start_hz: 400000000, stop_hz: 470000000, raster_hz: 12500}
+  dwell_s: 3                   # seconds per tuner step
+  segment_s: 1                 # PSD integration segment inside a dwell
+  snr_threshold_db: 9          # p95 channel SNR gate (same meaning as the surveyor)
+  raster_tolerance_hz: 2500    # how far from the 12.5 kHz raster a hit may sit
+  cycle_minutes: 30            # full survey repeat interval
+  same_site_max_span_hz: 5000000   # Cap+ carriers of one site are assumed within this span
+  tier3_bandplans: []          # optional: [{name, base_hz, step_hz, lpcn_offset}] for LPCN->frequency
+
+decode:
+  dsd_fme_bin: /usr/local/bin/dsd-fme
+  max_instances: 4             # Pi 5 budget: 4-6 concurrent DSD-FME processes
+  seconds_per_carrier: 60      # decode dwell per carrier per cycle
+  tcp_base_port: 7355          # PCM bridge ports: base, base+1, ... per instance
+  keep_raw_logs: false         # debug only
+  raw_log_max_mb: 50           # rotation size cap per raw log
+  raw_log_keep: 5              # rotated files kept
+
+ingest:
+  bucket_minutes: 15           # observation aggregation bucket
+
+correlator:
+  interval_minutes: 30
+  weights:                     # see DESIGN.md "Evidence"
+    explicit_neighbor: 0.90
+    explicit_lcn_freq: 0.95
+    explicit_same_site: 0.70
+    behavioral_rest_hop: 0.50
+    identity_radio: 0.30
+    identity_talkgroup: 0.15
+    rf_profile: 0.10
+    manual: 1.00
+  decay_days:                  # e-folding time per evidence class; 0 = no decay
+    explicit: 30
+    behavioral: 14
+    identity: 30
+    rf: 7
+    manual: 0
+  labels:                      # lower bounds of each confidence label
+    confirmed: 0.85
+    probable: 0.60
+    possible: 0.30
+  tier2_max_confidence: 0.60   # links supported only by Tier II evidence never exceed this
+
+archive:
+  enabled: false
+  host: archive-pi.tailnet     # second Pi, reachable over Tailscale only
+  user: pi
+  path: /srv/dmr-mapper/
+  hour: "03:30"                # nightly rsync of the SQLite file (local time)
+
+mcp:
+  bind: 100.64.0.1             # the Pi's Tailscale address; set it in config.local.yaml
+  port: 8765
