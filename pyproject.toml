@@ -13,7 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.0"]
+dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "numpy>=1.26", "scipy>=1.11", "textual>=0.80"]
+collector = ["numpy>=1.26", "scipy>=1.11"]   # SoapySDR python bindings come from the OS package
+tui = ["textual>=0.80"]
 mcp = ["mcp>=1.2"]
 
 [project.scripts]
@@ -27,3 +29,5 @@ include = ["dmr_mapper*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"

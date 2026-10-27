@@ -5,11 +5,22 @@ from __future__ import annotations
 import json
 import re
 import sqlite3
+import time
 from pathlib import Path
 from typing import Any, Iterable
 
 MIGRATIONS_DIR = Path(__file__).resolve().parent / "migrations"
 _MIGRATION_RE = re.compile(r"^(\d{3})_.*\.sql$")
+
+
+def _statements(script: str) -> list[str]:
+    """Split a migration file into statements: strip ``--`` comments, split on ';'."""
+    lines = [line.split("--", 1)[0] for line in script.splitlines()]
+    out = []
+    for part in "\n".join(lines).split(";"):
+        if part.strip():
+            out.append(part.strip())
+    return out
 
 
 def canonical_json(obj: Any) -> str:
@@ -30,7 +41,16 @@ class Store:
         self.conn.execute("PRAGMA foreign_keys = ON")
         self.conn.execute("PRAGMA busy_timeout = 10000")
         if self.path is not None:
-            self.conn.execute("PRAGMA journal_mode = WAL")
+            # Switching the journal mode needs the file to itself and ignores busy_timeout; another
+            # process may be creating the schema at this very moment (daemon and TUI started together).
+            for attempt in range(50):
+                try:
+                    self.conn.execute("PRAGMA journal_mode = WAL")
+                    break
+                except sqlite3.OperationalError:
+                    if attempt == 49:
+                        raise
+                    time.sleep(0.1)
             self.conn.execute("PRAGMA synchronous = NORMAL")
         self.migrate()
 
@@ -51,6 +71,9 @@ class Store:
     def commit(self) -> None:
         self.conn.commit()
 
+    def rollback(self) -> None:
+        self.conn.rollback()
+
     # -- migrations ------------------------------------------------------------------------
     def schema_version(self) -> int:
         row = self.conn.execute(
@@ -70,12 +93,23 @@ class Store:
         for version, path in scripts:
             if version <= current:
                 continue
-            script = path.read_text(encoding="utf-8")
-            if version > 1:
-                script += f"\nUPDATE schema_meta SET version = {version};\n"
-            # executescript commits any open transaction first; an explicit BEGIN/COMMIT makes the
-            # whole migration atomic, so a failure leaves no half-created schema behind.
-            self.conn.executescript("BEGIN;\n" + script + "\nCOMMIT;")
+            # One write transaction per migration, taken with BEGIN IMMEDIATE so that two processes
+            # opening a fresh database at the same moment (daemon and TUI) serialise: the second
+            # one re-reads the version inside the lock and finds the work already done.
+            self.conn.execute("BEGIN IMMEDIATE")
+            try:
+                if self.schema_version() >= version:
+                    self.conn.rollback()
+                    current = self.schema_version()
+                    continue
+                for stmt in _statements(path.read_text(encoding="utf-8")):
+                    self.conn.execute(stmt)
+                if version > 1:
+                    self.conn.execute("UPDATE schema_meta SET version = ?", (version,))
+                self.conn.commit()
+            except Exception:
+                self.conn.rollback()
+                raise
             current = version
         return current
 

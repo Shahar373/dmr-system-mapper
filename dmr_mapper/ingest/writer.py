@@ -78,8 +78,9 @@ class Aggregator:
     """Feed parser events for ONE carrier; ``flush()`` writes everything to the store."""
 
     def __init__(self, store: Store, carrier_id: int, source: str, bucket_minutes: int, stats: IngestStats,
-                 seconds_observed: float | None = None):
+                 seconds_observed: float | None = None, snr_db: float | None = None):
         self.store = store
+        self.snr_db = snr_db                 # survey SNR of this carrier, copied into every bucket
         self.carrier_id = carrier_id
         self.source = source
         self.bucket_s = max(60, int(bucket_minutes) * 60)
@@ -259,6 +260,9 @@ class Aggregator:
         for start, b in sorted(buckets.items()):
             agg = dict(b)
             agg["cc_histogram"] = dict(b["cc_histogram"])
+            if self.snr_db is not None:
+                agg.setdefault("snr_db_max", self.snr_db)
+                agg.setdefault("snr_db_avg", self.snr_db)
             self.store.add_observation(self.carrier_id, start, self.source, agg)
             if partial_before is not None:
                 del self._buckets[start]

@@ -55,8 +55,14 @@ def cmd_ingest(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     cfg = load_config(args.config)
+    from .collector import state as st
+
     with _open_store(args, cfg) as store:
         print(f"db: {store.path}  schema v{store.schema_version()}")
+        ds = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        print(f"daemon: {'alive, mode ' + ds.mode if ds.alive else 'not running'}" + (f"  ({ds.message})" if ds.message else ""))
+        for sess in st.sessions(store, 3):
+            print(f"  session {sess['id']} {sess['kind']} {sess['status']} budget {sess['budget_s']}s elapsed {sess['summary'].get('elapsed_s', '-')}s")
         for name in ("carriers", "observations", "csbk_events", "rest_events", "identities", "identity_sightings",
                      "links", "evidence", "ingest_runs", "survey_hits"):
             print(f"  {name:20s} {store.scalar(f'SELECT COUNT(*) FROM {name}')}")
@@ -205,6 +211,217 @@ def _not_yet(phase: str):
     return run
 
 
+# -- Phase 3: daemon, console, one-shot sessions -------------------------------------------------
+def _db_path(args: argparse.Namespace, cfg: dict) -> Path:
+    return Path(args.db) if getattr(args, "db", None) else resolve_path(cfg, "db")
+
+
+def cmd_daemon(args: argparse.Namespace) -> int:
+    from .collector.daemon import run_daemon
+
+    cfg = load_config(args.config)
+    path = _db_path(args, cfg)
+    print(f"daemon on {path} (config {cfg.get('_source')}); Ctrl-C or SIGTERM to stop", file=sys.stderr)
+    try:
+        return run_daemon(path, cfg)
+    except RuntimeError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+
+
+def cmd_tui(args: argparse.Namespace) -> int:
+    from .tui.app import run_tui
+
+    cfg = load_config(args.config)
+    run_tui(_db_path(args, cfg), cfg)
+    return 0
+
+
+def _session_command(args: argparse.Namespace, kind: str, params: dict) -> int:
+    """Post a command to the running daemon, or run a temporary in-process daemon when none is
+    running (so `mapper survey` works on a Pi before the service is installed)."""
+    import threading
+    import time
+
+    from .collector import state as st
+    from .collector.daemon import Daemon
+
+    cfg = load_config(args.config)
+    path = _db_path(args, cfg)
+    if args.minutes:
+        params["budget_s"] = int(args.minutes * 60)
+    with Store(path) as store:
+        status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        if status.alive:
+            cid = st.post_command(store, "cli", kind, params)
+            c = st.wait_for_command(store, cid, timeout_s=30)
+            print(f"{kind}: {c['status']}: {c['result']}" if c else f"{kind}: posted as command {cid}")
+            if not args.wait or not c or c["status"] != "done":
+                return 0 if c and c["status"] == "done" else 1
+            return _follow(store, cfg, int(c["result"].split()[1]))
+    d = Daemon(path, cfg)
+    th = threading.Thread(target=d.run, daemon=True)
+    th.start()
+    with Store(path) as store:
+        try:
+            time.sleep(0.5)
+            cid = st.post_command(store, "cli", kind, params)
+            c = st.wait_for_command(store, cid, timeout_s=30)
+            print(f"{kind}: {c['status']}: {c['result']}" if c else "no answer from the temporary daemon")
+            if not c or c["status"] != "done":
+                return 1
+            return _follow(store, cfg, int(c["result"].split()[1]))
+        except KeyboardInterrupt:
+            st.post_command(store, "cli", "stop")
+            time.sleep(2)
+            return 130
+        finally:
+            d.stop_event.set()
+            th.join(timeout=20)
+
+
+def _follow(store: Store, cfg: dict, session_id: int) -> int:
+    """Print progress until the session ends, then its summary."""
+    import time
+
+    from .collector import state as st
+
+    last = ""
+    while True:
+        s = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        sess = next((x for x in st.sessions(store, 5) if x["id"] == session_id), None)
+        if sess and sess["status"] in ("done", "stopped", "failed"):
+            print(f"session {session_id} {sess['status']} after {sess['summary'].get('elapsed_s', 0)} s")
+            print(json.dumps(sess["summary"], indent=2)[:4000])
+            return 0 if sess["status"] != "failed" else 1
+        if not s.alive:
+            print("daemon went away", file=sys.stderr)
+            return 1
+        pr = s.progress or {}
+        line = json.dumps({k: v for k, v in pr.items() if k != "carriers"}, sort_keys=True)
+        if line != last:
+            print(line, file=sys.stderr)
+            last = line
+        time.sleep(1)
+
+
+def cmd_survey(args: argparse.Namespace) -> int:
+    params: dict = {}
+    if args.band:
+        params["bands"] = args.band
+    if args.then_decode:
+        params["then_decode"] = True
+    return _session_command(args, "start_survey", params)
+
+
+def cmd_decode(args: argparse.Namespace) -> int:
+    params: dict = {}
+    if args.freq:
+        params["freqs"] = [int(f) for f in args.freq]
+    if args.instances:
+        params["max_instances"] = int(args.instances)
+    return _session_command(args, "start_decode", params)
+
+
+def cmd_control(args: argparse.Namespace) -> int:
+    from .collector import state as st
+
+    cfg = load_config(args.config)
+    with Store(_db_path(args, cfg)) as store:
+        status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        if not status.alive:
+            print("daemon is not running", file=sys.stderr)
+            return 1
+        cid = st.post_command(store, "cli", args.kind, {})
+        c = st.wait_for_command(store, cid, timeout_s=120)
+        print(f"{args.kind}: {c['status']}: {c['result']}" if c else "no answer")
+        return 0 if c and c["status"] == "done" else 1
+
+
+def cmd_capture_iq(args: argparse.Namespace) -> int:
+    from .collector.sdr import capture_iq, make_backend
+
+    cfg = load_config(args.config)
+    backend = make_backend(cfg)
+    status = backend.probe()
+    if status.status != "present":
+        print(f"error: {status.short()}", file=sys.stderr)
+        return 1
+    src = backend.open()
+    try:
+        n = capture_iq(src, args.center, args.seconds, Path(args.out))
+    finally:
+        src.close()
+    print(f"wrote {n} samples ({n / src.sample_rate:.1f} s, cf32, {src.sample_rate / 1e6:.2f} MS/s, centre {args.center / 1e6:.4f} MHz) to {args.out}")
+    print("replay it with sdr.source: file and sdr.replay.{path, center_hz} in config.local.yaml")
+    return 0
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    import platform
+    import shutil
+    import subprocess
+
+    from .collector import state as st
+    from .collector.decoder import find_dsd_fme
+    from .collector.power import read_power
+    from .collector.sdr import make_backend
+
+    cfg = load_config(args.config)
+    ok_all = True
+
+    def line(ok: bool | None, what: str, detail: str = "") -> None:
+        nonlocal ok_all
+        mark = "ok " if ok else ("-- " if ok is None else "BAD")
+        if ok is False:
+            ok_all = False
+        print(f"[{mark}] {what}{': ' + detail if detail else ''}")
+
+    line(True, "python", f"{platform.python_version()} on {platform.machine()} {platform.system()}")
+    line(True, "config", str(cfg.get("_source")))
+    for mod, why in (("numpy", "collector"), ("scipy", "collector"), ("textual", "tui"), ("networkx", "correlator"), ("yaml", "config")):
+        try:
+            m = __import__(mod)
+            line(True, mod, getattr(m, "__version__", ""))
+        except ImportError:
+            line(False, mod, f"missing (needed by {why}); pip install -e '.[collector,tui]'")
+    try:
+        import SoapySDR  # type: ignore[import-not-found]
+        line(True, "SoapySDR python bindings", str(SoapySDR.getAPIVersion()))
+    except ImportError:
+        line(cfg.get("sdr", {}).get("source") == "file" or None, "SoapySDR python bindings", "not importable: apt install python3-soapysdr (or run inside the surveyor's venv)")
+    exe = find_dsd_fme(cfg)
+    if exe:
+        try:
+            out = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=5)
+            ver = next((l.strip() for l in (out.stdout + out.stderr).splitlines() if "version" in l.lower() or "build" in l.lower()), "")
+        except (OSError, subprocess.SubprocessError) as exc:
+            ver = f"found but failed to run: {exc}"
+        line(True, "dsd-fme", f"{exe} {ver}".strip())
+    else:
+        line(False, "dsd-fme", f"not found ({cfg.get('decode', {}).get('dsd_fme_bin')}); set decode.dsd_fme_bin")
+    try:
+        status = make_backend(cfg).probe()
+        line(status.status == "present", "receiver", status.short() + (f" [{status.detail}]" if status.detail and status.detail not in status.short() else ""))
+    except Exception as exc:  # noqa: BLE001
+        line(False, "receiver", str(exc))
+    ps = read_power(cfg)
+    line(None if ps.source == "unknown" else True, "power", f"{ps.short()} (source: {ps.source})")
+    pfile = cfg.get("power", {}).get("state_file")
+    if pfile:
+        line(Path(pfile).exists(), "power state file", pfile)
+    line(shutil.which("vcgencmd") is not None or None, "vcgencmd", "present" if shutil.which("vcgencmd") else "absent (not a Pi?)")
+    path = _db_path(args, cfg)
+    with Store(path) as store:
+        size = path.stat().st_size if path.exists() else 0
+        line(True, "database", f"{path} schema v{store.schema_version()} {size / 1e6:.1f} MB")
+        status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        line(None, "daemon", f"{'alive' if status.alive else 'not running'}" + (f", mode {status.mode}" if status.alive else ""))
+    bands = cfg.get("survey", {}).get("bands", [])
+    line(bool(bands), "survey bands", ", ".join(f"{b.get('name')} {b.get('start_hz', 0) / 1e6:.1f}-{b.get('stop_hz', 0) / 1e6:.1f} MHz" for b in bands))
+    return 0 if ok_all else 1
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="mapper", description="Passive DMR network topology mapper")
     p.add_argument("--version", action="version", version=f"mapper {__version__}")
@@ -257,10 +474,44 @@ def build_parser() -> argparse.ArgumentParser:
     pr.add_argument("--note", default="")
     pr.set_defaults(func=cmd_propose)
 
-    for name, phase in (("collect", 3), ("serve-mcp", 4)):
-        sp = sub.add_parser(name, help=f"(Phase {phase})")
-        sp.add_argument("rest", nargs="*")
-        sp.set_defaults(func=_not_yet(str(phase)))
+    dm = sub.add_parser("daemon", help="run the collector daemon in the foreground (systemd runs this)")
+    dm.set_defaults(func=cmd_daemon)
+
+    tu = sub.add_parser("tui", help="operator console (Textual)")
+    tu.set_defaults(func=cmd_tui)
+
+    sv = sub.add_parser("survey", help="start a band survey session (through the daemon, or a temporary one)")
+    sv.add_argument("--band", action="append", help="band name from config (repeatable; default: all)")
+    sv.add_argument("--minutes", type=float, help="session budget")
+    sv.add_argument("--then-decode", action="store_true", help="queue a decode session when the survey ends")
+    sv.add_argument("--wait", action="store_true", default=True, help="follow the session until it ends (default)")
+    sv.add_argument("--no-wait", dest="wait", action="store_false")
+    sv.set_defaults(func=cmd_survey)
+
+    dc = sub.add_parser("decode", help="start a decode session (latest survey hits, or the given frequencies)")
+    dc.add_argument("freq", nargs="*", help="frequencies in Hz (default: plan from the latest survey)")
+    dc.add_argument("--minutes", type=float, help="session budget")
+    dc.add_argument("--instances", type=int, help="DSD-FME processes at once (default from power state)")
+    dc.add_argument("--wait", action="store_true", default=True)
+    dc.add_argument("--no-wait", dest="wait", action="store_false")
+    dc.set_defaults(func=cmd_decode)
+
+    for kind, help_ in (("stop", "stop the running session"), ("correlate-now", "ask the daemon to run the correlator")):
+        cp = sub.add_parser(kind, help=help_)
+        cp.set_defaults(func=cmd_control, kind=kind.replace("-now", ""))
+
+    ci = sub.add_parser("capture-iq", help="record raw IQ for replay (development tool; never done by the collector)")
+    ci.add_argument("--center", type=int, required=True, help="centre frequency in Hz")
+    ci.add_argument("--seconds", type=float, default=11.0)
+    ci.add_argument("--out", required=True, help="output file (cf32)")
+    ci.set_defaults(func=cmd_capture_iq)
+
+    dr = sub.add_parser("doctor", help="check this machine: python packages, SoapySDR, dsd-fme, receiver, power, database")
+    dr.set_defaults(func=cmd_doctor)
+
+    sp = sub.add_parser("serve-mcp", help="(Phase 4)")
+    sp.add_argument("rest", nargs="*")
+    sp.set_defaults(func=_not_yet("4"))
     return p
 
 
