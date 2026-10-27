@@ -19,18 +19,31 @@ def _open_store(args: argparse.Namespace, cfg: dict) -> Store:
 
 
 def cmd_ingest(args: argparse.Namespace) -> int:
-    from .ingest import ingest_path, ingest_stream
+    from .ingest import ingest_path, ingest_stream, parse_log_filename
     from .ingest.report import format_report
+    from .ingest.runner import parse_start
 
     cfg = load_config(args.config)
-    start = datetime.fromisoformat(args.start) if args.start else None
+    try:
+        start = parse_start(args.start)
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     with _open_store(args, cfg) as store:
         if args.path == "-" or args.stream:
-            if not args.freq:
+            freq = args.freq
+            if args.path != "-":
+                name_freq, name_start = parse_log_filename(args.path)
+                freq = freq or name_freq
+                start = start or name_start
+            if not freq:
                 print("error: --freq is required when ingesting a stream", file=sys.stderr)
                 return 2
-            lines = sys.stdin if args.path == "-" else Path(args.path).open("r", encoding="utf-8", errors="replace")
-            results = [ingest_stream(store, lines, cfg, args.freq, args.source or "collector", start)]
+            if args.path == "-":
+                results = [ingest_stream(store, sys.stdin, cfg, freq, args.source or "collector", start)]
+            else:
+                with Path(args.path).open("r", encoding="utf-8", errors="replace") as fh:
+                    results = [ingest_stream(store, fh, cfg, freq, args.source or "collector", start)]
         else:
             results = ingest_path(store, Path(args.path), cfg, args.freq, start, args.source, args.force)
     if args.json:

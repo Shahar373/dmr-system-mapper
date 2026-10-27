@@ -42,10 +42,11 @@ def test_ingest_results(surveyor_store):
     assert by_freq[162_587_500]["variant"] == "capplus" and by_freq[162_587_500]["dominant_cc"] == 5
     for f in (164_300_000, 164_325_000, 164_537_500, 164_725_000, 165_625_000, 167_137_500):
         assert by_freq[f]["variant"] == "tier2", f
-    sites = {r["freq_hz"]: r["site"] for r in s.rows(
-        "SELECT c.freq_hz, json_extract(e.payload, '$.site') AS site FROM csbk_events e JOIN carriers c ON c.id = e.carrier_id"
-        " WHERE e.kind = 'capplus_site'")}
-    assert sites == {162_525_000: 0, 162_587_500: 5}
+    sites: dict[int, set[int]] = {}
+    for r in s.rows("SELECT c.freq_hz, json_extract(e.payload, '$.site') AS site FROM csbk_events e"
+                    " JOIN carriers c ON c.id = e.carrier_id WHERE e.kind = 'capplus_site'"):
+        sites.setdefault(r["freq_hz"], set()).add(r["site"])
+    assert sites == {162_525_000: {0}, 162_587_500: {5}}
 
 
 def test_surveyor_time_is_recording_time(surveyor_store):
@@ -58,4 +59,14 @@ def test_surveyor_time_is_recording_time(surveyor_store):
     assert 17 < row[0]["seconds_observed"] < 19          # 6.8 s + 11.2 s recordings in the same bucket
     c13 = next(r for r in s.results if r.meta.get("candidate_id") == "C0013" and r.meta.get("recording_id") == "20260713_150256")
     assert c13.first_ts == int(datetime(2026, 7, 13, 15, 2, 56, tzinfo=TZ).timestamp())
+    # M1: the decode clock (1 s) is stretched onto the 11.19 s recording
+    assert 10 <= c13.last_ts - c13.first_ts <= 12
     assert c13.structural["activity_update"] == 36 and c13.bursts["voice"] == 47
+
+
+def test_surveyor_reingest_is_skipped(surveyor_store, cfg):
+    from dmr_mapper.ingest import ingest_surveyor
+    before = surveyor_store.scalar("SELECT SUM(bursts) FROM observations")
+    again = ingest_surveyor(surveyor_store, SURVEYOR_ROOT, cfg)
+    assert all(r.skipped for r in again)
+    assert surveyor_store.scalar("SELECT SUM(bursts) FROM observations") == before

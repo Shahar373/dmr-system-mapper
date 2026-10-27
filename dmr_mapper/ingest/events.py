@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 # Burst categories used for observation counters.
-VOICE_KINDS = {"VLC", "TLC", "VC1", "VC2", "VC3", "VC4", "VC5", "VC6", "VC1*"}
+VOICE_KINDS = {"VLC", "TLC", "VC1", "VC2", "VC3", "VC4", "VC5", "VC6", "VC1*", "VC*"}
 DATA_KIND_PREFIXES = ("DATA", "R12", "R34", "R_1", "R_2", "R12U", "R34U", "R34C", "R12C")
 IDLE_KINDS = {"IDLE"}
 CSBK_KINDS = {"CSBK", "MBC"}

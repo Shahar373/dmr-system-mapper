@@ -77,8 +77,8 @@ def test_capplus_channel_status_with_bank_and_lsn_list():
     assert status.payload["rest_lsn"] == 6 and status.payload["block"] == "single"
     assert status.payload["fl"] == 3 and status.payload["ts"] == 1
     assert status.payload["lsn_states"] == {1: "idle", 2: "idle", 3: "idle", 4: "idle", 5: 64250, 6: "rest", 7: "idle", 8: "idle"}
-    assert status.payload["bank"]["lsn_to_tg"] == {5: 64250}
-    assert ("radio", 64250, "private_or_data") in status.identities
+    assert status.payload["banks"]["one"]["lsn_to_tg"] == {5: 64250}
+    assert ("tg", 64250, "lsn_active") in status.identities   # nothing yet says 64250 is an individual
     assert status.slot == 2 and status.cc == 2
     site = evs[0]
     assert site.payload == {"site": 2, "rest_lsn": 6, "rs": "00"}
@@ -145,7 +145,7 @@ def test_tier2_lines():
     )
     evs = _parse(text)
     structural = {e.kind: e for e in evs if isinstance(e, Structural)}
-    assert structural["protected_lc"].payload == {"slot": 1, "lc": "protected", "flco": "0X3F", "fid": "0X7D", "crc_err": False}
+    assert structural["protected_lc"].payload == {"slot": 1, "lc": "protected", "flco": "0X3F", "fid": "0X7D"}
     assert structural["activity_update"].payload == {"ts1": "Group Voice", "hash1": 7, "ts2": "Idle", "hash2": 0}
     assert structural["moto_data_channel"].payload == {"opcode": "29", "bytes": "04 00 00 3B 08 FC 00 00"}
     q = [e.counter for e in evs if isinstance(e, Quality)]
@@ -164,6 +164,96 @@ def test_midnight_rollover_and_decode_clock_offsets():
     evs = [e for e in _parse(text, start_time=datetime(2026, 7, 13, 15, 2, 42, tzinfo=TZ), time_is_rf=False) if isinstance(e, Burst)]
     assert evs[0].ts == int(datetime(2026, 7, 13, 15, 2, 42, tzinfo=TZ).timestamp())
     assert evs[1].ts - evs[0].ts == 2
+
+
+def test_first_line_date_vs_start_clock():
+    # H1: capture started at 23:59:58, first line is after midnight → next day, not 24 h earlier
+    text = "00:00:03 Sync: +DMR  [slot1]  slot2  | Color Code=02 | IDLE \n"
+    ev = _parse(text, start_time=datetime(2026, 5, 9, 23, 59, 58, tzinfo=TZ))[0]
+    assert ev.ts == int(datetime(2026, 5, 10, 0, 0, 3, tzinfo=TZ).timestamp())
+    # a buffered line from just before midnight when the stream started just after it → previous day
+    text = "23:59:59 Sync: +DMR  [slot1]  slot2  | Color Code=02 | IDLE \n"
+    ev = _parse(text, start_time=datetime(2026, 5, 10, 0, 0, 1, tzinfo=TZ))[0]
+    assert ev.ts == int(datetime(2026, 5, 9, 23, 59, 59, tzinfo=TZ).timestamp())
+
+
+def test_clock_scale_for_decode_logs():
+    # M1: decode wall clock runs faster than the recording; offsets are scaled onto the RF duration
+    text = (
+        "19:58:29 Sync: +DMR  [slot1]  slot2  | Color Code=08 | IDLE \n"
+        "19:58:30 Sync: +DMR  [slot1]  slot2  | Color Code=08 | IDLE \n"
+    )
+    evs = _parse(text, start_time=datetime(2026, 7, 13, 15, 2, 56, tzinfo=TZ), time_is_rf=False, clock_scale=11.0)
+    assert evs[1].ts - evs[0].ts == 11
+
+
+def test_payload_before_first_sync_is_not_timestamped_zero():
+    # M2: a stream that starts mid-record must not produce epoch-0 events
+    text = (
+        "Build Version: AW 2026-26\n"
+        " Preamble CSBK - Individual Data - Source: 199 - Target: 64250 - Rest LSN: 6\n"
+        "16:33:44 Sync: +DMR  [slot1]  slot2  | Color Code=02 | CSBK\n"
+    )
+    evs = _parse(text)
+    assert not any(isinstance(e, Structural) for e in evs)
+    assert any(isinstance(e, Unrecognized) and "before first sync" in e.text for e in evs)
+    assert any(type(e).__name__ == "Meta" and e.key == "build" for e in evs)
+
+
+def test_two_banks_and_individual_targets():
+    # M6 + L10: both banks are kept; an ID is a radio only once an Individual record named it
+    text = (
+        "16:33:44 Sync: +DMR   slot1  [slot2] | Color Code=02 | CSBK\n"
+        " Preamble CSBK - Individual Data - Source: 199 - Target: 100 - Rest LSN: 6\n"
+        "16:33:45 Sync: +DMR   slot1  [slot2] | Color Code=02 | CSBK\n"
+        " Capacity Plus Channel Status - FL: 3 TS: 1 RS: 0 - Rest LSN: 6 - Single Block\n"
+        " Bank One F80 Private or Data Call(s) -  LSN 05: TGT 100;\n"
+        " Bank Two F90 Private or Data Call(s) -  LSN 12: TGT 200;\n"
+        "  LSN 05: 100;  LSN 06:  Rest;  LSN 12: 200;\n"
+        "16:33:46 Sync: +DMR  [slot1]  slot2  | Color Code=02 | CSBK\n"
+    )
+    evs = [e for e in _parse(text) if isinstance(e, Structural)]
+    status = evs[-1]
+    assert status.kind == "capplus_channel_status"
+    assert set(status.payload["banks"]) == {"one", "two"}
+    assert status.payload["banks"]["two"]["lsn_to_tg"] == {12: 200}
+    assert ("radio", 100, "lsn_active") in status.identities
+    assert ("tg", 200, "lsn_active") in status.identities
+    assert not any(i[2] == "private_or_data" for i in status.identities)
+
+
+def test_xpt_multi_lcn_line():
+    # M5: several LCNs on one line, each LSN mapped to the LCN before it
+    text = (
+        "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK\n"
+        " Hytera XPT Site Status - Free LCN: 3 SN: 1\n"
+        " LCN 1 - LSN 01: Idle; LSN 02: Idle;  LCN 2 - LSN 03: Priv; LSN 04: Null;\n"
+        "12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK\n"
+    )
+    ev = [e for e in _parse(text) if isinstance(e, Structural)][0]
+    assert ev.payload["lcns"] == [1, 2]
+    assert ev.payload["lsn_lcn"] == {1: 1, 2: 1, 3: 2, 4: 2}
+
+
+def test_new_record_is_never_swallowed_by_pending_bcast():
+    text = (
+        "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK\n"
+        " Announcements (C_BCAST) General Site Parameters (Gen_Site_Params)\n"
+        " C_ALOHA_SYS_PARMS: Small; Net ID: 1; Site ID: 7; SYS: 1A2B;\n"
+        "12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=09 | CSBK\n"
+    )
+    kinds = [e.kind for e in _parse(text) if isinstance(e, Structural)]
+    assert kinds == ["tier3_bcast", "tier3_sys_parms"]
+
+
+def test_corrupt_lc_is_a_counter_not_an_event():
+    text = (
+        "16:33:44 Sync: +DMR   slot1  [slot2] | Color Code=02 | VLC \n"
+        " SLOT 2 Unknown LC  FLCO=0x28 FID=0x80  (CRC ERR)\n"
+    )
+    evs = _parse(text)
+    assert not any(isinstance(e, Structural) for e in evs)
+    assert [e.counter for e in evs if isinstance(e, Quality)] == ["crc_err"]
 
 
 def test_unrecognized_is_reported_not_dropped():

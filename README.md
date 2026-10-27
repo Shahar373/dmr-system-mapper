@@ -15,10 +15,10 @@ stands alone.
 ## Architecture
 
 ```
- Raspberry Pi 5 (2x SDRplay RSP1B, headless, Tailscale)
+ Raspberry Pi 5 (1x SDRplay RSP1B, headless, Tailscale)
  ┌──────────────────────────────────────────────────────────────────────┐
  │ collector (systemd)                                                  │
- │   band survey ──► carrier list ──► channelizer ──► dsd-fme ×4        │
+ │   band survey ──► carrier list ──► 2 MHz slice + channelizer ──► dsd-fme ×4 │
  │                                        48 kHz PCM / TCP     │ stderr │
  │                                                             ▼        │
  │   streaming parser ──► aggregated events ──► SQLite (var/mapper.db) │
@@ -90,8 +90,10 @@ The database defaults to `var/mapper.db` (override with `--db` or `paths.db` in 
 Every ingest prints a coverage report: bursts by type, colour codes, structural events (and how many
 rows survived de-duplication), rest-channel transitions, identities, the variant guess, parsers that
 have no real capture yet (`untested_on_air`), and every unrecognized line pattern with an example, so a
-new DSD-FME build shows up as a short list rather than silent loss. Files already ingested (same path,
-size and mtime) are skipped unless `--force` is given.
+new DSD-FME build shows up as a short list rather than silent loss. A file whose content was already
+ingested (keyed on a hash of its first 64 KB, so copies at other paths count) is skipped unless
+`--force` is given; a file that has grown since, such as a raw log still being appended to, is
+resumed from the byte where the last ingest stopped.
 
 What ingest extracts from a log: burst header per frame (colour code, slot, burst type, CRC state),
 Capacity Plus channel status / LSN lists / site / adjacent sites / preambles / calls, Connect Plus

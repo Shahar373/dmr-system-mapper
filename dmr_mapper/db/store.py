@@ -28,6 +28,7 @@ class Store:
         self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
+        self.conn.execute("PRAGMA busy_timeout = 10000")
         if self.path is not None:
             self.conn.execute("PRAGMA journal_mode = WAL")
             self.conn.execute("PRAGMA synchronous = NORMAL")
@@ -37,11 +38,14 @@ class Store:
     def __enter__(self) -> "Store":
         return self
 
-    def __exit__(self, *exc: object) -> None:
+    def __exit__(self, exc_type: object, *exc: object) -> None:
+        if exc_type is not None:
+            self.conn.rollback()   # never persist a half-written ingest
         self.close()
 
     def close(self) -> None:
-        self.conn.commit()
+        if self.conn.in_transaction:
+            self.conn.commit()
         self.conn.close()
 
     def commit(self) -> None:
@@ -66,10 +70,12 @@ class Store:
         for version, path in scripts:
             if version <= current:
                 continue
-            with self.conn:
-                self.conn.executescript(path.read_text(encoding="utf-8"))
-                if version > 1:
-                    self.conn.execute("UPDATE schema_meta SET version = ?", (version,))
+            script = path.read_text(encoding="utf-8")
+            if version > 1:
+                script += f"\nUPDATE schema_meta SET version = {version};\n"
+            # executescript commits any open transaction first; an explicit BEGIN/COMMIT makes the
+            # whole migration atomic, so a failure leaves no half-created schema behind.
+            self.conn.executescript("BEGIN;\n" + script + "\nCOMMIT;")
             current = version
         return current
 
@@ -88,6 +94,12 @@ class Store:
             (seen_at, seen_at, band, row["id"]),
         )
         return int(row["id"])
+
+    def upsert_carrier_seen(self, carrier_id: int, first_ts: int, last_ts: int) -> None:
+        self.conn.execute(
+            "UPDATE carriers SET first_seen = MIN(first_seen, ?), last_seen = MAX(last_seen, ?) WHERE id = ?",
+            (first_ts, last_ts, carrier_id),
+        )
 
     def update_carrier_summary(self, carrier_id: int) -> None:
         """Recompute dominant colour code and variant from stored data."""
@@ -171,20 +183,17 @@ class Store:
         self, carrier_id: int, ts: int, slot: int | None, cc: int | None, kind: str,
         payload: dict[str, Any], dedup_key: str,
     ) -> bool:
-        """Insert or bump a de-duplicated structural event. Returns True when a new row was made."""
-        cur = self.conn.execute(
-            "UPDATE csbk_events SET count = count + 1, last_ts = MAX(last_ts, ?), ts = MIN(ts, ?)"
-            " WHERE carrier_id = ? AND kind = ? AND dedup_key = ?",
-            (ts, ts, carrier_id, kind, dedup_key),
-        )
-        if cur.rowcount:
-            return False
-        self.conn.execute(
+        """Insert or bump a de-duplicated structural event. Returns True when a new row was made.
+        A single upsert statement keeps this atomic when several collector processes write."""
+        row = self.conn.execute(
             "INSERT INTO csbk_events (carrier_id, ts, slot, cc, kind, payload, count, last_ts, dedup_key)"
-            " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)",
+            " VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)"
+            " ON CONFLICT(carrier_id, kind, dedup_key) DO UPDATE SET"
+            " count = count + 1, last_ts = MAX(last_ts, excluded.last_ts), ts = MIN(ts, excluded.ts)"
+            " RETURNING count",
             (carrier_id, ts, slot, cc, kind, canonical_json(payload), ts, dedup_key),
-        )
-        return True
+        ).fetchone()
+        return int(row[0]) == 1
 
     def add_rest_event(self, carrier_id: int, ts: int, site: int | None, rest_lsn: int, prev_lsn: int | None) -> None:
         self.conn.execute(
@@ -229,9 +238,13 @@ class Store:
 
     # -- ingest bookkeeping ------------------------------------------------------------------
     def find_ingest_run(self, source: str, path: str, fingerprint: str) -> sqlite3.Row | None:
+        """Latest finished run of this content. ``fingerprint`` is the content hash of the file head
+        (see runner.file_fingerprint), so a copy of an ingested log at another path is recognised;
+        the caller compares ``byte_offset`` with the current size to resume a file that grew."""
         return self.conn.execute(
-            "SELECT * FROM ingest_runs WHERE source = ? AND path = ? AND fingerprint = ? AND finished IS NOT NULL",
-            (source, path, fingerprint),
+            "SELECT * FROM ingest_runs WHERE source = ? AND fingerprint = ? AND finished IS NOT NULL"
+            " ORDER BY byte_offset DESC, id DESC LIMIT 1",
+            (source, fingerprint),
         ).fetchone()
 
     def start_ingest_run(self, source: str, path: str | None, carrier_id: int | None, started: int, fingerprint: str | None) -> int:
@@ -241,10 +254,11 @@ class Store:
         )
         return int(cur.lastrowid)
 
-    def finish_ingest_run(self, run_id: int, finished: int, lines: int, parsed: int, unrecognized: dict[str, tuple[int, str]]) -> None:
+    def finish_ingest_run(self, run_id: int, finished: int, lines: int, parsed: int, unrecognized: dict[str, tuple[int, str]],
+                          byte_offset: int = 0) -> None:
         self.conn.execute(
-            "UPDATE ingest_runs SET finished = ?, lines = ?, parsed = ?, unrecognized = ? WHERE id = ?",
-            (finished, lines, parsed, sum(c for c, _ in unrecognized.values()), run_id),
+            "UPDATE ingest_runs SET finished = ?, lines = ?, parsed = ?, unrecognized = ?, byte_offset = ? WHERE id = ?",
+            (finished, lines, parsed, sum(c for c, _ in unrecognized.values()), byte_offset, run_id),
         )
         self.conn.executemany(
             "INSERT OR REPLACE INTO unrecognized_lines (run_id, pattern, count, example) VALUES (?, ?, ?, ?)",

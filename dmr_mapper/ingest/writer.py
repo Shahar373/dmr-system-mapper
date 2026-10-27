@@ -91,7 +91,8 @@ class Aggregator:
         self._last_rest: int | None = None
         self._last_site: int | None = None
         self._status_key: str | None = None
-        self._status_ts: int | None = None
+        self._status_ts: int | None = None          # ts at which the current status signature started
+        self._last_status_seen_ts: int | None = None  # ts of the most recent Channel Status CSBK
         self._distinct_values: dict[str, set[int]] = defaultdict(set)
 
     # -- helpers ---------------------------------------------------------------------------
@@ -200,13 +201,19 @@ class Aggregator:
             self._sight(kind, value, ev.ts, role)
 
         if ev.kind == "capplus_channel_status":
+            self._last_status_seen_ts = ev.ts
             self._rest(ev.ts, ev.payload["rest_lsn"])
             states = {k: v for k, v in ev.payload.get("lsn_states", {}).items() if v != "idle"}
-            sig = canonical_json({"rest": ev.payload["rest_lsn"], "states": states, "bank": ev.payload.get("bank")})
-            if sig != self._status_key:
-                self._status_key = sig
-                self._status_ts = ev.ts
-            key = f"{sig}@{self._status_ts}"
+            has_list = bool(states) or bool(ev.payload.get("banks")) or ev.payload.get("block") not in ("initial",)
+            if not has_list and self._status_key is not None and f'"rest":{ev.payload["rest_lsn"]}' in self._status_key:
+                # an Initial Block carries no LSN list: it does not change the current signature
+                key = f"{self._status_key}@{self._status_ts}"
+            else:
+                sig = canonical_json({"rest": ev.payload["rest_lsn"], "states": states, "banks": ev.payload.get("banks")})
+                if sig != self._status_key:
+                    self._status_key = sig
+                    self._status_ts = ev.ts
+                key = f"{sig}@{self._status_ts}"
         elif ev.kind == "capplus_site":
             self._last_site = ev.payload["site"]
             self._rest(ev.ts, ev.payload["rest_lsn"], from_slco=True)
@@ -214,47 +221,59 @@ class Aggregator:
         else:
             key = self._dedup_key(ev)
 
-        if ev.kind in ("slco_other",):
-            pass
         new = self.store.add_csbk_event(self.carrier_id, ev.ts, ev.slot, ev.cc, ev.kind, ev.payload, key)
         if new:
             st.stored_events[ev.kind] += 1
 
     def _rest(self, ts: int, rest_lsn: int, from_slco: bool = False) -> None:
-        self._bucket(ts)["rest_lsn_last"] = rest_lsn
         if rest_lsn == self._last_rest:
+            self._bucket(ts)["rest_lsn_last"] = rest_lsn
             return
-        if from_slco and self._last_rest is not None and self._status_ts is not None and ts - self._status_ts < 10:
+        if (from_slco and self._last_rest is not None and self._last_status_seen_ts is not None
+                and ts - self._last_status_seen_ts < 10):
             # the CSBK channel status is authoritative while it is flowing; the short LC lags it
             return
+        self._bucket(ts)["rest_lsn_last"] = rest_lsn
         self.store.add_rest_event(self.carrier_id, ts, self._last_site, rest_lsn, self._last_rest)
         self._last_rest = rest_lsn
         self.stats.rest_transitions += 1
 
     # -- flush -----------------------------------------------------------------------------
-    def flush(self) -> IngestStats:
+    def flush(self, partial_before: int | None = None) -> IngestStats:
+        """Write accumulated rows. With ``partial_before``, only buckets that end before that
+        epoch are written (and dropped from memory); identities are always written and reset.
+        Live streams call this periodically so a killed collector loses at most one bucket."""
+        buckets = self._buckets
+        if partial_before is not None:
+            buckets = {st: b for st, b in self._buckets.items() if st + self.bucket_s <= partial_before}
         total_span = 0
-        for start, b in self._buckets.items():
+        for start, b in buckets.items():
             lo, hi = self._bucket_span[start]
             span = min(hi - lo + 1, self.bucket_s)
             total_span += span
             b["seconds_observed"] = span
-        if self.fixed_seconds is not None and total_span > 0:
+        if self.fixed_seconds is not None and total_span > 0 and partial_before is None:
             scale = self.fixed_seconds / total_span
-            for b in self._buckets.values():
+            for b in buckets.values():
                 b["seconds_observed"] = round(b["seconds_observed"] * scale, 3)
-        for start, b in sorted(self._buckets.items()):
+        for start, b in sorted(buckets.items()):
             agg = dict(b)
             agg["cc_histogram"] = dict(b["cc_histogram"])
             self.store.add_observation(self.carrier_id, start, self.source, agg)
+            if partial_before is not None:
+                del self._buckets[start]
+                del self._bucket_span[start]
         for (kind, value), rec in self._identities.items():
             ident_id = self.store.upsert_identity(kind, value, rec["first"])
             self.store.upsert_identity(kind, value, rec["last"])
             for day, (count, roles) in rec["days"].items():
                 self.store.add_sighting(ident_id, self.carrier_id, day, count, roles)
+        self._identities.clear()
         for kind, values in self._distinct_values.items():
             self.stats.identities[kind] = len(values)
         self.store.update_carrier_summary(self.carrier_id)
+        if self.stats.first_ts is not None:
+            self.store.upsert_carrier_seen(self.carrier_id, self.stats.first_ts, self.stats.last_ts or self.stats.first_ts)
         row = self.store.conn.execute("SELECT variant, variant_confidence FROM carriers WHERE id = ?", (self.carrier_id,)).fetchone()
         self.stats.variant, self.stats.variant_confidence = row["variant"], row["variant_confidence"]
         return self.stats

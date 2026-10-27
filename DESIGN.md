@@ -71,8 +71,12 @@ and MCP.
 - DSD-FME log lines carry only `HH:MM:SS`. The ingest context supplies the date: from the log
   filename (`dsd_fme_<freqHz>_<YYYYmmdd_HHMMSS>.log`), from the surveyor `recording_id`, or from
   the collector's own clock. The parser handles midnight rollover (time going backwards → +1 day).
-- Surveyor decode logs carry the *decode* wall clock, not the RF time. For them the RF time is the
-  recording start and line times are only used as relative offsets.
+- Surveyor decode logs carry the *decode* wall clock, not the RF time, and DSD-FME decodes a
+  recording much faster than real time (11 s of audio in about 1 s). For them the RF time is the
+  recording start, and line clocks are offsets scaled by `duration / (last clock − first clock)`.
+- A capture whose first line is just after midnight while its start time is just before it (or
+  the reverse, for a buffered line) is placed on the right day by comparing the first line's
+  clock with the start-of-capture clock.
 
 ### Carrier identity
 
@@ -105,12 +109,12 @@ CREATE TABLE carriers (
 CREATE TABLE observations (
   carrier_id          INTEGER NOT NULL REFERENCES carriers(id),
   bucket_start        INTEGER NOT NULL,
-  source              TEXT NOT NULL,        -- collector|surveyor|import
-  seconds_observed    REAL NOT NULL,        -- how long a decoder was listening in this bucket
+  source              TEXT NOT NULL,        -- dsdfme_log|surveyor|collector|import
+  seconds_observed    REAL NOT NULL DEFAULT 0,   -- how long a decoder was listening in this bucket
   bursts              INTEGER NOT NULL DEFAULT 0,   -- all "Sync: +DMR" lines
   csbk                INTEGER NOT NULL DEFAULT 0,
   voice               INTEGER NOT NULL DEFAULT 0,   -- VLC + VCn + TLC
-  data                INTEGER NOT NULL DEFAULT 0,   -- DATA + R12U/R34U/R_1U + data headers
+  data                INTEGER NOT NULL DEFAULT 0,   -- DATA + R12U/R34U/R_1U bursts
   idle                INTEGER NOT NULL DEFAULT 0,
   crc_err             INTEGER NOT NULL DEFAULT 0,   -- CRC/FEC error lines
   no_sync             INTEGER NOT NULL DEFAULT 0,
@@ -120,7 +124,8 @@ CREATE TABLE observations (
   slot2_syncs         INTEGER NOT NULL DEFAULT 0,
   snr_db_max          REAL,                 -- from survey hits in the same bucket, if any
   snr_db_avg          REAL,
-  rest_lsn_last       INTEGER,              -- Cap+ only
+  rest_lsn_last       INTEGER,              -- Cap+ only; last ACCEPTED rest LSN in the bucket
+  cc_histogram        TEXT NOT NULL DEFAULT '{}',   -- JSON {cc: bursts}, merged across ingests
   PRIMARY KEY (carrier_id, bucket_start, source)
 );
 
@@ -134,7 +139,9 @@ CREATE TABLE csbk_events (
   kind                TEXT NOT NULL,        -- see §3.2
   payload             TEXT NOT NULL,        -- JSON, canonical key order
   count               INTEGER NOT NULL DEFAULT 1,
-  last_ts             INTEGER NOT NULL
+  last_ts             INTEGER NOT NULL,
+  dedup_key           TEXT NOT NULL,        -- see §3.1; one row per (carrier, kind, key)
+  UNIQUE (carrier_id, kind, dedup_key)
 );
 CREATE INDEX csbk_events_carrier_kind ON csbk_events(carrier_id, kind, ts);
 
@@ -148,6 +155,7 @@ CREATE TABLE rest_events (
   prev_lsn            INTEGER               -- NULL on the first observation of a session
 );
 CREATE INDEX rest_events_ts ON rest_events(ts);
+CREATE INDEX rest_events_carrier ON rest_events(carrier_id, ts);
 
 -- Radio IDs and talkgroups.
 CREATE TABLE identities (
@@ -164,7 +172,7 @@ CREATE TABLE identity_sightings (
   carrier_id          INTEGER NOT NULL REFERENCES carriers(id),
   day                 INTEGER NOT NULL,     -- UTC day number (epoch // 86400)
   count               INTEGER NOT NULL DEFAULT 0,
-  roles               TEXT NOT NULL DEFAULT '',  -- comma set: src,tgt,lrrp,data
+  roles               TEXT NOT NULL DEFAULT '',  -- comma set: src,tgt,lrrp,data,lsn_active
   PRIMARY KEY (identity_id, carrier_id, day)
 );
 
@@ -239,7 +247,9 @@ CREATE TABLE ingest_runs (
   finished            INTEGER,
   lines               INTEGER NOT NULL DEFAULT 0,
   parsed              INTEGER NOT NULL DEFAULT 0,
-  unrecognized        INTEGER NOT NULL DEFAULT 0
+  unrecognized        INTEGER NOT NULL DEFAULT 0,
+  fingerprint         TEXT,                 -- sha1 of the file's first 64 KB: idempotence key (path-independent)
+  byte_offset         INTEGER NOT NULL DEFAULT 0   -- bytes consumed; a file that grew is resumed from here
 );
 CREATE TABLE unrecognized_lines (
   run_id              INTEGER NOT NULL REFERENCES ingest_runs(id),
@@ -269,8 +279,12 @@ CREATE TABLE survey_hits (
   PRIMARY KEY (run_id, freq_hz)
 );
 
-CREATE TABLE schema_meta (version INTEGER NOT NULL);
+CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 2
 ```
+
+Migrations run inside one transaction each (`BEGIN … COMMIT`), so a failed migration leaves no
+half-created schema. Every ingest of a file is one transaction: an interrupted run rolls back and
+the next run starts clean. Live streams commit closed buckets every 60 s and on SIGTERM.
 
 ### 3.1 De-duplication rules for `csbk_events`
 
@@ -279,7 +293,10 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 
 - `capplus_channel_status`: stored only when the **rest LSN changes** or the **LSN list changes**
   (new TG on an LSN, LSN leaving Idle). Unchanged repeats increment `count`/`last_ts` on the open
-  row. Rest LSN changes also create a `rest_events` row.
+  row; `Initial Block` records (which carry no LSN list) never change the signature. Rest LSN
+  changes also create a `rest_events` row. A rest LSN from the short LC (`capplus_site`) is
+  accepted only when no Channel Status CSBK was seen in the last 10 s, because the short LC lags
+  the CSBK and would otherwise create spurious A→B→A transitions.
 - `capplus_site`, `capplus_adjacent`, `conplus_adjacent`, `conplus_sys`, `tier3_bcast`,
   `tier3_sys_parms`, `xpt_site_status`, `xpt_adjacent`, `xpt_slco`, `moto_data_channel`: one row per
   distinct `payload` per carrier per UTC day, with `count` incremented on repeats.
@@ -294,7 +311,7 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 
 | kind | payload keys |
 |---|---|
-| `capplus_channel_status` | `fl, ts, rs, rest_lsn, block, lsn_states{lsn: "rest"|"idle"|tg}, bank{flag, lsn_to_tg}` |
+| `capplus_channel_status` | `fl, ts, rs, rest_lsn, block, lsn_states{lsn: "rest"|"idle"|id}, banks{one|two: {flag, desc, lsn_to_tg}}`. An id in the list is a talkgroup unless an Individual-addressed preamble/data header named it (DSD-FME prints `TGT` in Bank lines for group calls too) |
 | `capplus_site` | `site, rest_lsn, rs` (from short LC) |
 | `capplus_adjacent` | `sites[{site, rest_lsn}]` |
 | `capplus_rest_change` | `rest_lsn, reason` (only with `-Z`) |
@@ -302,9 +319,9 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 | `conplus_sys` | `role: control|traffic, net_id, site_id` |
 | `conplus_adjacent` | `sites[int]` |
 | `grant` | `variant, kind: group|private|data, tgt, src, lcn, ts, lpcn, freq_hz` |
-| `tier3_sys_parms` | `source: c_aloha|slc_c|slc_p, model, net_id, site_id, sub_site, sys_code, cat, reg, csc` |
-| `tier3_bcast` | `a_type, lpcn, apcn, rx_freq_hz, tx_freq_hz, online, cc_pri, ac_pri, sys_code` |
-| `xpt_site_status` | `free_lcn, sn, lcn, lsn_states` |
+| `tier3_sys_parms` | `source: c_aloha_sys_parms|slc_c_sys_parms|slc_p_sys_parms, model, net_id, site_id, sub_site, sys_code, cat, reg, csc` |
+| `tier3_bcast` | `a_type, text, lpcn, apcn, rx_freq_hz, rx_base_hz, rx_step_hz, tx_freq_hz, online, cc_pri, ac_pri, sys_code, adj_model, adj_net_id, adj_site_id, adj_sub_site` |
+| `xpt_site_status` | `free_lcn, sn, lcns[], lsn_states, lsn_lcn{lsn: lcn}` |
 | `xpt_adjacent` | `sn, sites[{site, free}]` |
 | `xpt_slco` | `free_lcn, pri_lcn, pri_hash` |
 | `call` | `slot, src, tgt, group, capplus, txi, xpt, rest_lsn, free_lcn, desc` (from `SLOT n TGT= SRC= … Call`) |
@@ -313,7 +330,9 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 | `data_header` | `slot, addressing, delivery, src, tgt, response_requested` |
 | `ip_map` | `role, radio, ip, port` |
 | `lrrp` | `src, tgt, direction, lat, lon` |
-| `protected_lc` | `slot, flco, fid` |
+| `protected_lc` | `slot, lc: protected|unknown, flco, fid` (lines with `(CRC ERR)` only feed the error counter) |
+| `data_response` | `tgt, src, text` (`DATA RESP` acknowledgements) |
+| `slco_other` | `text` (Cap Max / Caltta / unknown SLCO, per distinct text per day) |
 | `unknown_csbk` | `text` (first 120 chars; one row per distinct text per day; what `ingest` reports as unrecognized CSBK) |
 
 ## 4. Evidence model

@@ -31,12 +31,31 @@ def test_example_config_loads_and_local_overrides(tmp_path, monkeypatch):
 def test_store_migrates_and_reopens(tmp_path):
     p = tmp_path / "m.db"
     with Store(p) as s:
-        assert s.schema_version() == 1
+        assert s.schema_version() == 2
         cid = s.upsert_carrier(168863000, 100)
         assert s.upsert_carrier(168863000, 50) == cid
     with Store(p, create=False) as s:
         row = s.rows("SELECT first_seen, last_seen FROM carriers")[0]
         assert (row["first_seen"], row["last_seen"]) == (50, 100)
+
+
+def test_missing_env_config_is_an_error(tmp_path, monkeypatch):
+    import pytest
+    monkeypatch.setenv("DMR_MAPPER_CONFIG", str(tmp_path / "nope.yaml"))
+    with pytest.raises(FileNotFoundError):
+        load_config()
+
+
+def test_store_rolls_back_on_exception(tmp_path):
+    p = tmp_path / "rb.db"
+    try:
+        with Store(p) as s:
+            s.upsert_carrier(1, 0)
+            raise RuntimeError("boom")
+    except RuntimeError:
+        pass
+    with Store(p, create=False) as s:
+        assert s.scalar("SELECT COUNT(*) FROM carriers") == 0
 
 
 def test_csbk_event_dedup(store):
@@ -72,10 +91,12 @@ def test_cli_stream_mode(tmp_path):
     db = tmp_path / "stream.db"
     text = Path(CAPPLUS_LOG).read_text(encoding="utf-8", errors="replace").splitlines(keepends=True)[:2000]
     r = subprocess.run([sys.executable, "-m", "dmr_mapper.cli", "--db", str(db), "ingest", "-", "--freq", "168863000",
-                        "--start", "2026-05-09T16:33:44+03:00"], input="".join(text), capture_output=True, text=True, cwd=REPO,
-                       env={"PYTHONPATH": str(REPO), "PATH": "/usr/bin:/bin"})
+                        "--start", "2026-05-09T16:33:44"], input="".join(text), capture_output=True, text=True, cwd=REPO,
+                       env={"PYTHONPATH": str(REPO), "PATH": "/usr/bin:/bin", "TZ": "UTC"})
     assert r.returncode == 0, r.stderr
-    assert "source: collector" not in r.stdout or True
     with Store(db, create=False) as s:
         assert s.scalar("SELECT source FROM observations") == "collector"
         assert s.scalar("SELECT SUM(bursts) FROM observations") > 500
+        # H4: a naive --start is interpreted in the configured zone (Asia/Jerusalem), not the system one
+        first = s.scalar("SELECT MIN(bucket_start) FROM observations")
+        assert first == 1778333400   # 2026-05-09 13:30:00Z bucket containing 16:33:44+03:00

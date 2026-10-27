@@ -13,9 +13,9 @@ timezone: Asia/Jerusalem       # display only; the database stores UTC epoch sec
 
 sdr:
   driver: sdrplay              # SoapySDR driver name (SoapySDRPlay3)
-  devices:                     # 2x RSP1B on the Pi; serials from `SoapySDRUtil --find`
-    - {serial: "", role: survey}   # wideband sweeps
-    - {serial: "", role: decode}   # narrowband decode of selected carriers
+  devices:                     # one RSP1B: it alternates survey sweeps and decode dwells.
+    - {serial: "", role: any}  # serial from `SoapySDRUtil --find`; add a second entry with
+                               # role: survey / role: decode when a second receiver exists
   sample_rate_hz: 2000000      # survey capture rate (RSP1B: 2-10.66 MS/s continuous)
   gain:
     ifgr: 40                   # IF gain reduction (dB)

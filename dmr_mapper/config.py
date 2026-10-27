@@ -54,6 +54,8 @@ def load_config(explicit: str | os.PathLike[str] | None = None) -> dict[str, Any
             raise FileNotFoundError(override)
     elif os.environ.get(ENV_VAR):
         override = Path(os.environ[ENV_VAR])
+        if not override.exists():
+            raise FileNotFoundError(f"${ENV_VAR} points to a missing file: {override}")
     else:
         for candidate in (Path.cwd() / LOCAL_NAME, root / LOCAL_NAME):
             if candidate.exists():

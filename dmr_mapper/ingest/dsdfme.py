@@ -54,6 +54,7 @@ class ParseContext:
     start_time: datetime | None = None   # tz-aware; date source for HH:MM:SS lines
     source: str = "dsdfme_log"
     time_is_rf: bool = True              # False: line clocks are decode wall-clock, use offsets
+    clock_scale: float = 1.0             # offset multiplier when time_is_rf is False (decode runs faster than RF)
     tz: ZoneInfo = field(default_factory=lambda: ZoneInfo("UTC"))
 
 
@@ -153,6 +154,17 @@ UNKNOWN_CSBK_RE = re.compile(r"Unknown CSBK|CSBK Opcode|MFID: |Opcode: ")
 # Which pending records accept which continuation lines
 _PENDING_KINDS_WITH_LSN = {"capplus_channel_status", "xpt_site_status"}
 
+# Lines that always START a record: they are never treated as a continuation of a pending one.
+_NEW_RECORD_RES = (
+    CAP_STATUS_RE, CAP_SITE_RE, CAP_ADJ_HDR_RE, CAP_REST_CHANGE_RE, PREAMBLE_RE, CALL_RE,
+    CON_SYS_RE, CON_ADJ_RE, CON_VGRANT_RE, CON_DGRANT_RE, T3_SYS_RE, T3_BCAST_RE, T3_GRANT_RE,
+    XPT_STATUS_RE, XPT_ADJ_HDR_RE, XPT_SLCO_RE, ACTIVITY_RE, MOTO_DATA_RE, DATA_HDR_RE, IP_MAP_RE, LRRP_RE,
+)
+
+
+def starts_record(s: str) -> bool:
+    return any(r.search(s) for r in _NEW_RECORD_RES)
+
 
 def _bucket_hex(bytes_str: str) -> str:
     return " ".join(bytes_str.split()[:3])
@@ -170,33 +182,47 @@ class LineParser:
         self._slot: int | None = None
         self._cc: int | None = None
         self._pending: Structural | None = None
+        self._start: datetime | None = None         # resolved start time (cached once)
+        self._individual_targets: set[int] = set()  # IDs seen as Individual/Indiv targets (radios, not TGs)
         self.lines = 0
         self.parsed = 0
         self.unrecognized = 0
 
     # -- time ----------------------------------------------------------------------------------
+    def _start_time(self) -> datetime:
+        if self._start is None:
+            start = self.ctx.start_time
+            if start is None:
+                start = datetime.now(tz=self.ctx.tz)
+            if start.tzinfo is None:
+                start = start.replace(tzinfo=self.ctx.tz)
+            self._start = start.astimezone(self.ctx.tz)
+        return self._start
+
     def _resolve_time(self, clock: str) -> int:
         h, m, s = (int(x) for x in clock.split(":"))
         clock_s = h * 3600 + m * 60 + s
-        if self._first_clock_s is None:
-            self._first_clock_s = clock_s
-        start = self.ctx.start_time
-        if start is None:
-            start = datetime.now(tz=self.ctx.tz)
-        if start.tzinfo is None:
-            start = start.replace(tzinfo=self.ctx.tz)
+        start = self._start_time()
         if not self.ctx.time_is_rf:
-            # decode-time clock: only the offset from the first line matters
+            # decode-time clock: only the (scaled) offset from the first line matters
+            if self._first_clock_s is None:
+                self._first_clock_s = clock_s
             offset = clock_s - self._first_clock_s
             if offset < 0:
                 offset += 86400
             self._last_clock_s = clock_s
-            return int((start + timedelta(seconds=offset)).timestamp())
+            return int((start + timedelta(seconds=offset * self.ctx.clock_scale)).timestamp())
         if self._date_anchor is None:
-            local_start = start.astimezone(self.ctx.tz)
-            self._date_anchor = local_start.replace(hour=0, minute=0, second=0, microsecond=0)
-            # if the first line clock is far before the start-of-file clock, assume same day anyway
-        if self._last_clock_s is not None and clock_s < self._last_clock_s - 3600:
+            self._date_anchor = start.replace(hour=0, minute=0, second=0, microsecond=0)
+            start_clock_s = start.hour * 3600 + start.minute * 60 + start.second
+            # The first line is compared with the start-of-capture clock: a line just after midnight
+            # belongs to the next day, a buffered line from just before midnight to the previous one.
+            if clock_s < start_clock_s - 3600:
+                self._date_anchor += timedelta(days=1)
+            elif clock_s > start_clock_s + 3600 and start_clock_s < 3600:
+                self._date_anchor -= timedelta(days=1)
+            self._first_clock_s = clock_s
+        elif self._last_clock_s is not None and clock_s < self._last_clock_s - 3600:
             self._date_anchor += timedelta(days=1)   # midnight rollover
         self._last_clock_s = clock_s
         return int((self._date_anchor + timedelta(seconds=clock_s)).timestamp())
@@ -212,14 +238,13 @@ class LineParser:
                 ev.payload["sites"] = []
             yield ev
 
-    @staticmethod
-    def _finalize_channel_status(ev: Structural) -> None:
+    def _finalize_channel_status(self, ev: Structural) -> None:
         states = ev.payload.setdefault("lsn_states", {})
-        bank = ev.payload.get("bank")
-        private_targets = set((bank or {}).get("lsn_to_tg", {}).values())
         for lsn, state in states.items():
             if state not in ("rest", "idle") and isinstance(state, int):
-                kind = "radio" if state in private_targets else "tg"
+                # DSD-FME prints "TGT" in Bank lines for group calls too, so the bank cannot tell
+                # radios from talkgroups; only an Individual-addressed record can.
+                kind = "radio" if state in self._individual_targets else "tg"
                 ev.identities.append((kind, state, "lsn_active"))
 
     def _open(self, kind: str, payload: dict[str, Any], **kw: Any) -> Iterator[Event]:
@@ -247,6 +272,18 @@ class LineParser:
         if m:
             yield from self._flush()
             yield from self._burst(m)
+            return
+
+        if self._ts is None:
+            # Nothing can be timestamped before the first Sync line: keep the DSD-FME header as
+            # metadata, report anything else (a stream that started mid-record) as unrecognized.
+            if mm := META_RE.match(stripped):
+                self.parsed += 1
+                key = next((k for k, v in mm.groupdict().items() if v is not None), "banner")
+                yield Meta(None, key, (mm.groupdict().get(key) or stripped)[:200])
+            else:
+                self.unrecognized += 1
+                yield Unrecognized(None, "(before first sync) " + stripped[:180])
             return
 
         handled = yield from self._payload(stripped)
@@ -298,20 +335,30 @@ class LineParser:
         p = self._pending
 
         # --- continuation lines for pending multi-line records -------------------------------
-        if p is not None:
+        if p is not None and not starts_record(s):
             if p.kind in _PENDING_KINDS_WITH_LSN and (bm := CAP_BANK_RE.search(s)):
-                p.payload["bank"] = {
-                    "bank": bm.group("bank"), "flag": bm.group("flag"), "desc": bm.group("desc"),
+                p.payload.setdefault("banks", {})[bm.group("bank").lower()] = {
+                    "flag": bm.group("flag"), "desc": bm.group("desc"),
                     "lsn_to_tg": {int(x.group("lsn")): int(x.group("tg")) for x in LSN_TGT_RE.finditer(bm.group("rest"))},
                 }
-                for tg in p.payload["bank"]["lsn_to_tg"].values():
-                    p.identities.append(("radio", tg, "private_or_data"))
                 return True
             if p.kind in _PENDING_KINDS_WITH_LSN and LSN_STATE_RE.search(s) and "TGT" not in s:
                 states = p.payload.setdefault("lsn_states", {})
-                lcn_m = XPT_LCN_RE.search(s)
-                if lcn_m and p.kind == "xpt_site_status":
-                    p.payload.setdefault("lcns", []).append(int(lcn_m.group("lcn")))
+                if p.kind == "xpt_site_status":
+                    # "LCN 1 - LSN 01: ...; LSN 02: ...;  LCN 2 - LSN 03: ...": LSNs belong to the LCN before them
+                    lcn_spans = [(x.start(), int(x.group("lcn"))) for x in XPT_LCN_RE.finditer(s)]
+                    lcns = p.payload.setdefault("lcns", [])
+                    lsn_lcn = p.payload.setdefault("lsn_lcn", {})
+                    for _, lcn in lcn_spans:
+                        if lcn not in lcns:
+                            lcns.append(lcn)
+                    for x in LSN_STATE_RE.finditer(s):
+                        owner = None
+                        for pos, lcn in lcn_spans:
+                            if pos < x.start():
+                                owner = lcn
+                        if owner is not None:
+                            lsn_lcn[int(x.group("lsn"))] = owner
                 for x in LSN_STATE_RE.finditer(s):
                     st = x.group("state")
                     states[int(x.group("lsn"))] = int(st) if st.isdigit() else st.lower()
@@ -373,6 +420,8 @@ class LineParser:
             return True
         if m := PREAMBLE_RE.search(s):
             src, tgt = int(m.group("src")), int(m.group("tgt"))
+            if m.group("addr") == "Individual":
+                self._individual_targets.add(tgt)
             ids = [("radio", src, "src"), ("radio" if m.group("addr") == "Individual" else "tg", tgt, "tgt")]
             yield self._event("preamble", {
                 "addressing": m.group("addr").lower(), "kind": m.group("kind").lower(), "src": src, "tgt": tgt,
@@ -487,11 +536,16 @@ class LineParser:
             yield self._event("slco_other", {"text": s[:80]})
             return True
         if m := LC_RE.search(s):
-            yield self._event("protected_lc", {"slot": int(m.group("slot")), "lc": m.group("kind").lower(), "flco": m.group("flco").upper(), "fid": m.group("fid").upper(),
-                                               "crc_err": "CRC ERR" in s})
+            if "CRC ERR" in s:
+                yield Quality(self._ts, "crc_err")   # corrupt LC: its FLCO/FID are not trustworthy
+                return True
+            yield self._event("protected_lc", {"slot": int(m.group("slot")), "lc": m.group("kind").lower(),
+                                               "flco": m.group("flco").upper(), "fid": m.group("fid").upper()})
             return True
         if m := DATA_HDR_RE.search(s):
             src, tgt = int(m.group("src")), int(m.group("tgt"))
+            if m.group("addr") == "Indiv":
+                self._individual_targets.add(tgt)
             yield self._event("data_header", {
                 "slot": int(m.group("slot")), "addressing": m.group("addr").lower(), "delivery": m.group("delivery").strip(),
                 "src": src, "tgt": tgt, "response_requested": "Response Requested" in s,
