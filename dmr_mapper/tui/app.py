@@ -57,7 +57,8 @@ class StatusBar(Static):
         power = s.power or {}
         sdr_txt = {"present": "[green]ready[/]", "busy": "[yellow]busy[/]", "absent": "[red]not connected[/]"}.get(sdr.get("status"), f"[red]{sdr.get('status')}[/]")
         if sdr.get("holder"):
-            sdr_txt += f" ({sdr['holder']})"
+            h = str(sdr["holder"])
+            sdr_txt += f" ({h[:50] + '…' if len(h) > 50 else h})"
         p_txt = "mains" if power.get("supply_full") else ("[yellow]battery[/]" if power.get("supply_full") is False else "supply?")
         if power.get("volts"):
             p_txt += f" {power['volts']:.2f}V"
@@ -82,7 +83,7 @@ class StatusBar(Static):
 class MapperApp(App[None]):
     TITLE = "dmr-system-mapper"
     CSS = """
-    #status { height: 3; padding: 0 1; background: $panel; }
+    #status { height: auto; min-height: 3; max-height: 6; padding: 0 1; background: $panel; }
     #actions { width: 26; padding: 1; }
     #actions Button { width: 100%; margin-bottom: 1; }
     #budget { margin-bottom: 1; }

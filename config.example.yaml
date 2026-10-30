@@ -23,8 +23,10 @@ sdr:
     ifgr: 40                   # IF gain reduction (dB)
     lna_state: 3               # RFGR / LNA state
     agc: false
-  known_users:                 # process names that may hold the receiver (reported when it is busy)
-    [trunk-recorder, surveyor, webtune, sdrconnect, sdrpp, gqrx, rx_fm, SoapySDRServer]
+  usb_vendor: "1df7"           # USB vendor id of the receiver (1df7 = SDRplay); tells "not plugged in" from "in use"
+  known_users:                 # program or script names (exact) of SDR users run by OTHER Linux users,
+                               # whose /proc maps we cannot read; our own user's are found by their libraries
+    [trunk-recorder, SDRconnect, sdrconnect, sdrpp, gqrx, rx_fm, rx_sdr, SoapySDRServer]
   replay:                      # only for source: file
     path: ""                   # raw IQ file (cf32 or cs16 interleaved)
     format: cf32

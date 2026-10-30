@@ -33,7 +33,7 @@ from .decoder import DecoderProcess, find_dsd_fme
 from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
-from .sdr import Backend, SdrStatus, make_backend
+from .sdr import Backend, SdrStatus, guess_holder, make_backend
 from .survey import latest_hits, record, sweep
 
 
@@ -179,7 +179,15 @@ class Daemon:
             self.sdr = self._probe()
             self._last_probe = time.monotonic()
             if self.sdr.status != "present":
-                return False, self.sdr.short()
+                return False, self.sdr.short() + (f" ({self.sdr.detail})" if self.sdr.detail and self.sdr.detail not in self.sdr.short() else "")
+            # Open the receiver here, before reporting "started": a refusal from the driver then
+            # reaches the operator as the command's result, with the driver's own words.
+            try:
+                source = self.backend.open()
+            except Exception as exc:  # noqa: BLE001
+                holder = self.sdr.holder or guess_holder(self.cfg)
+                self.sdr = SdrStatus("busy", self.sdr.driver, self.sdr.serial, holder, str(exc)[:200], int(time.time()))
+                return False, f"could not open the receiver: {exc}" + (f" (in use by {holder})" if holder else "")
             self.power = read_power(self.cfg)
             instances, default_budget = budget_for(self.power, self.cfg)
             budget = int(params.get("budget_s") or default_budget)
@@ -191,7 +199,7 @@ class Daemon:
             self.session_stop.clear()
             self.progress = {"kind": session_kind, "phase": "starting"}
             self.message = f"{session_kind} session #{sid} started ({budget // 60} min budget, {self.power.short()})"
-            self.session_thread = threading.Thread(target=self._session_main, args=(sid, session_kind, params, budget),
+            self.session_thread = threading.Thread(target=self._session_main, args=(sid, session_kind, params, budget, source),
                                                    name=f"session-{sid}", daemon=True)
             self.session_thread.start()
             return True, f"session {sid} started"
@@ -219,15 +227,13 @@ class Daemon:
         with self._lock:
             self.progress.update(kw)
 
-    def _session_main(self, sid: int, kind: str, params: dict[str, Any], budget_s: int) -> None:
+    def _session_main(self, sid: int, kind: str, params: dict[str, Any], budget_s: int, source: Any) -> None:
         store = Store(self.db_path)
         summary: dict[str, Any] = {"budget_s": budget_s}
         status = "done"
-        source = None
         t0 = time.monotonic()
         try:
             st.start_session(store, sid)
-            source = self.backend.open()
             summary["source"] = source.describe()
             if kind == "survey":
                 self._survey(store, source, params, budget_s, t0, summary)

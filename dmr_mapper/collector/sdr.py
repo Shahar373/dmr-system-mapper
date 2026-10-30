@@ -273,6 +273,9 @@ class SoapyBackend:
         return args
 
     def probe(self) -> SdrStatus:
+        """Non-invasive check: never opens the device. Opening it, even for a moment, could make a
+        program that starts at that instant fail, and the receiver is shared. The device is opened
+        only when a session starts (``open``)."""
         now = int(time.time())
         try:
             import SoapySDR  # type: ignore[import-not-found]
@@ -282,49 +285,85 @@ class SoapyBackend:
             found = SoapySDR.Device.enumerate(self._args())
         except Exception as exc:  # noqa: BLE001 - driver errors are strings
             return SdrStatus("error", self.driver, None, None, f"enumerate failed: {exc}"[:200], now)
-        if not found:
-            return SdrStatus("absent", self.driver, self.serial or None, None, None, now)
-        serial = str(dict(found[0]).get("serial", "")) or (self.serial or None)
-        try:
-            dev = SoapySDR.Device(self._args())
-            dev = None  # noqa: F841 - close
-        except Exception as exc:  # noqa: BLE001
-            holder = guess_holder(self.cfg)
-            text = str(exc)
-            status = "busy" if holder or re.search(r"busy|in use|already|locked|not available|fail", text, re.IGNORECASE) else "error"
-            return SdrStatus(status, self.driver, serial, holder, text[:200], now)
-        holder = guess_holder(self.cfg)
-        if holder:
-            # the device opened, but something that normally streams is running: warn, do not block
-            return SdrStatus("present", self.driver, serial, holder, "another SDR program is running", now)
-        return SdrStatus("present", self.driver, serial, None, None, now)
+        users = sdr_users(self.cfg)
+        holder = "; ".join(users) if users else None
+        if found:
+            serial = str(dict(found[0]).get("serial", "")) or (self.serial or None)
+            return SdrStatus("present", self.driver, serial, holder, "another SDR program is running" if holder else None, now)
+        if usb_present(self.cfg):
+            # plugged in, but the driver does not offer it: the SDRplay API hides a device that
+            # another program has selected
+            return SdrStatus("busy", self.driver, self.serial or None, holder,
+                             "connected, but the driver does not offer it: another program is using it", now)
+        return SdrStatus("absent", self.driver, self.serial or None, None, None, now)
 
     def open(self) -> IQSource:
         return SoapySource(self.cfg, self._args())
 
 
-def guess_holder(cfg: dict[str, Any]) -> str | None:
-    """Name of a running process that looks like an SDR user (from sdr.known_users)."""
-    patterns = [str(p).lower() for p in (cfg.get("sdr", {}).get("known_users") or []) if p]
-    if not patterns:
-        return None
+SDR_LIBRARIES = ("libsdrplay_api", "libsdrPlaySupport", "librtlsdr", "libairspy", "libhackrf", "libSoapySDR")
+SERVICE_NAMES = ("sdrplay_apiService",)
+
+
+def usb_present(cfg: dict[str, Any]) -> bool:
+    """Is a receiver of the configured USB vendor plugged in (sysfs, no device access)?"""
+    vendor = str((cfg.get("sdr", {}) or {}).get("usb_vendor", "1df7")).lower()
+    root = Path("/sys/bus/usb/devices")
+    try:
+        for d in root.iterdir():
+            try:
+                if (d / "idVendor").read_text().strip().lower() == vendor:
+                    return True
+            except OSError:
+                continue
+    except OSError:
+        return False
+    return False
+
+
+def _proc_name(pid: int) -> tuple[str, list[str]]:
+    raw = Path(f"/proc/{pid}/cmdline").read_bytes()
+    argv = [a.decode("utf-8", "replace") for a in raw.split(b"\0") if a]
+    names = [os.path.basename(a) for a in argv[:2]]          # the program, and the script of an interpreter
+    return " ".join(argv)[:60], names
+
+
+def sdr_users(cfg: dict[str, Any]) -> list[str]:
+    """Other processes that use an SDR right now. A process counts when it has an SDR driver library
+    loaded (``/proc/<pid>/maps``, readable for our own user) or, for processes of other users, when
+    its program or script name is in ``sdr.known_users`` (exact name, not a substring of a path).
+    The SDRplay API service itself and our own process tree do not count."""
+    known = {str(n).lower() for n in ((cfg.get("sdr", {}) or {}).get("known_users") or []) if n}
     me = os.getpid()
+    family = {me, os.getppid()}
+    out: list[str] = []
     try:
         pids = [int(p) for p in os.listdir("/proc") if p.isdigit()]
     except OSError:
-        return None
+        return out
     for pid in pids:
-        if pid == me:
+        if pid in family:
             continue
         try:
-            cmd = Path(f"/proc/{pid}/cmdline").read_bytes().replace(b"\0", b" ").decode("utf-8", "replace").strip()
+            cmd, names = _proc_name(pid)
         except OSError:
             continue
-        low = cmd.lower()
-        for pat in patterns:
-            if pat in low:
-                return f"{cmd[:60]} (pid {pid})"
-    return None
+        if not names or any(n in SERVICE_NAMES for n in names):
+            continue
+        uses = False
+        try:
+            maps = Path(f"/proc/{pid}/maps").read_text(errors="replace")
+            uses = any(lib in maps for lib in SDR_LIBRARIES)
+        except OSError:
+            uses = any(n.lower() in known or n.lower().rsplit(".", 1)[0] in known for n in names)
+        if uses:
+            out.append(f"{cmd} (pid {pid})")
+    return out
+
+
+def guess_holder(cfg: dict[str, Any]) -> str | None:
+    users = sdr_users(cfg)
+    return "; ".join(users) if users else None
 
 
 def make_backend(cfg: dict[str, Any]) -> Backend:
