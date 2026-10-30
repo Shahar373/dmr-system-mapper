@@ -392,10 +392,11 @@ belong to a **class** that carries the config weight and decay constant.
 | `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
 | `identity_radio` | identity | 0.30 | `min(1, shared_radios / 5)` | `same_system` | the same radio ID seen as `src` on both carriers within 24 h |
 | `identity_talkgroup` | identity | 0.15 | `min(1, shared_tgs / 3)` | `same_system` | the same TG on both carriers within 24 h (low: TG numbers are reused across unrelated systems) |
+| `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same undecoded SLCO payload (`SLCO Completed Block [..]`, `SLCO Unknown`) repeated ≥ 3 times on both carriers, same colour code; payloads present on more than max(4, half) of the carriers count as vendor defaults and are ignored. Field run 2026-10-30: two VHF Tier II repeaters shared two such payloads |
 | `rf_profile` | rf | 0.10 | correlation of activity-per-bucket profiles (Pearson over ≥ 24 shared buckets, clipped to 0..1), only when colour codes match | `same_system` | observations |
 | `manual` | manual | 1.00 | as given by `propose_link` (0..1) | any | MCP / CLI |
 
-Tier II specific rule: a link whose evidence is only `identity_*` and `rf_profile` is marked
+Tier II specific rule: a link whose evidence is only `identity_*` (radio, talkgroup, SLCO) and `rf_profile` is marked
 `tier2_only = 1` and its score is capped at `tier2_max_confidence` (0.60). Such links can never be
 labelled `confirmed`, and the HTML export draws them dashed.
 

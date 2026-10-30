@@ -20,6 +20,7 @@ EVIDENCE_CLASS: dict[str, str] = {
     "behavioral_lsn_table": "behavioral",
     "identity_radio": "identity",
     "identity_talkgroup": "identity",
+    "identity_slco": "identity",
     "rf_profile": "rf",
     "manual": "manual",
 }
@@ -28,7 +29,7 @@ EVIDENCE_CLASS: dict[str, str] = {
 STRONG_TYPES = {t for t, c in EVIDENCE_CLASS.items() if c in ("explicit", "manual") and not t.endswith("_contradiction")}
 
 # Evidence types that only Tier II carriers can produce; a link with nothing else is "tier2_only".
-TIER2_TYPES = {"identity_radio", "identity_talkgroup", "rf_profile"}
+TIER2_TYPES = {"identity_radio", "identity_talkgroup", "identity_slco", "rf_profile"}
 
 
 @dataclass(slots=True)

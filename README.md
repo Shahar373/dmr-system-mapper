@@ -101,9 +101,9 @@ mapper export --html map.html --graphml map.graphml --json-path map.json --min-l
 mapper propose 164300000 167137500 same_system 0.9 --note "heard the dispatcher on both"
 ```
 
-The correlator collects nine evidence types (explicit site/system/neighbour/channel announcements,
-Capacity Plus rest-channel hops and LSN-list alignment, shared radio IDs and talkgroups, RF activity
-profiles), stores every row in `evidence`, combines them per link with noisy-OR after weight and
+The correlator collects ten evidence types (explicit site/system/neighbour/channel announcements,
+Capacity Plus rest-channel hops and LSN-list alignment, shared radio IDs, talkgroups and undecoded SLCO
+payloads, RF activity profiles), stores every row in `evidence`, combines them per link with noisy-OR after weight and
 time decay, and labels each link `confirmed` / `probable` / `possible` / `weak`. A link supported
 only by Tier II evidence is capped at 0.6 and marked `T2` in the map; `confirmed` needs explicit or
 manual evidence. `propose` records manual evidence that the automatic pass never overwrites or

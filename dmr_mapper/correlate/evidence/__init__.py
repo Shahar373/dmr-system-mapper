@@ -20,6 +20,7 @@ COLLECTORS: dict[str, Collector] = {
     "behavioral_lsn_table": behavioral.lsn_table,
     "identity_radio": identity.radio,
     "identity_talkgroup": identity.talkgroup,
+    "identity_slco": identity.slco_pattern,
     "rf_profile": rf.profile,
 }
 

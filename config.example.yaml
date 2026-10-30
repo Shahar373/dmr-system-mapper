@@ -83,6 +83,7 @@ correlator:
     behavioral_rest_hop: 0.50
     identity_radio: 0.30
     identity_talkgroup: 0.15
+    identity_slco: 0.20         # Tier II: the same undecoded SLCO content repeated on two carriers
     rf_profile: 0.10
     manual: 1.00
   decay_days:                  # e-folding time per evidence class; 0 = no decay

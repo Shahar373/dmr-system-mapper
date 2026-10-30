@@ -76,3 +76,34 @@ def test_different_net_ids_are_different_networks(store, cfg):
         "SELECT l.kind FROM links l JOIN carriers a ON a.id = l.a_carrier_id JOIN carriers b ON b.id = l.b_carrier_id"
         " WHERE 469350000 IN (a.freq_hz, b.freq_hz)")}
     assert "same_system" not in kinds
+
+
+def _slco(store, cid, text, n, ts=NOW - 120):
+    for _ in range(n):
+        store.add_csbk_event(cid, ts, 1, 6, "slco_other", {"text": text}, text)
+
+
+def test_tier2_repeaters_sharing_slco_payloads_get_weak_capped_evidence(store, cfg):
+    """164.325 and 165.625 MHz (CC 6) from the field run: the same two undecoded SLCO payloads."""
+    a = store.upsert_carrier(164_325_000, NOW - 600)
+    b = store.upsert_carrier(165_625_000, NOW - 600)
+    c = store.upsert_carrier(166_000_000, NOW - 600)      # same payloads, other colour code
+    for cid, cc in ((a, 6), (b, 6), (c, 9)):
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+        store.conn.execute("UPDATE carriers SET variant = 'tier2', variant_confidence = 0.6, dominant_cc = ? WHERE id = ?", (cc, cid))
+    _slco(store, a, "SLCO Completed Block [18][00][70][07][60]", 111)
+    _slco(store, b, "SLCO Completed Block [18][00][70][07][60]", 110)
+    _slco(store, a, "SLCO Completed Block [10][A0][04][96][90]", 3)
+    _slco(store, b, "SLCO Completed Block [10][A0][04][96][90]", 6)
+    _slco(store, a, "SLCO Completed Block [10][B0][07][E8][70]", 2)     # too rare on a: not counted
+    _slco(store, b, "SLCO Completed Block [10][B0][07][E8][70]", 9)
+    _slco(store, c, "SLCO Completed Block [18][00][70][07][60]", 50)
+    store.commit()
+    run(store, cfg, now=NOW)
+    rows = [dict(r) for r in store.rows(
+        "SELECT a.freq_hz AS fa, b.freq_hz AS fb, l.* FROM links l JOIN carriers a ON a.id = l.a_carrier_id JOIN carriers b ON b.id = l.b_carrier_id")]
+    ab = next(r for r in rows if (r["fa"], r["fb"]) == (164_325_000, 165_625_000))
+    assert ab["kind"] == "same_system" and ab["tier2_only"] and ab["label"] != "confirmed" and ab["score"] <= 0.6
+    ev = next(e for e in explain(store, ab["id"], cfg, now=NOW)["evidence"] if e["type"] == "identity_slco")
+    assert ev["details"]["shared"] == 2 and ev["raw"] == round(2 / 3, 4) and ev["weight"] == 0.2
+    assert not any(166_000_000 in (r["fa"], r["fb"]) for r in rows)    # different colour code
