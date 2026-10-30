@@ -1,0 +1,15 @@
+# Rendered by deploy/deploy.sh. Started by dmr-mapper-snapshot.timer.
+[Unit]
+Description=dmr-system-mapper nightly correlate, database snapshot and exports
+
+[Service]
+Type=oneshot
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@REPO@
+Environment=PYTHONUNBUFFERED=1
+ExecStart=@REPO@/.venv/bin/mapper correlate
+ExecStart=@REPO@/.venv/bin/mapper snapshot
+ExecStart=@REPO@/.venv/bin/mapper export --all --min-label weak
+Nice=10
+IOSchedulingClass=idle

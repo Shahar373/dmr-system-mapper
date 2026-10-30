@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -103,40 +104,12 @@ def cmd_correlate(args: argparse.Namespace) -> int:
 
 
 def cmd_systems(args: argparse.Namespace) -> int:
-    from .correlate.model import LABELS
-    from .export.graph import LABEL_RANK
+    from .export.report import systems_report
 
     cfg = load_config(args.config)
-    max_rank = LABEL_RANK.get(args.min_label, 2)
     with _open_store(args, cfg) as store:
-        systems = [dict(r) for r in store.rows("SELECT * FROM systems ORDER BY id")]
-        sites = [dict(r) for r in store.rows("SELECT * FROM sites ORDER BY system_id, directly_observed DESC, id")]
-        members = [dict(r) for r in store.rows(
-            "SELECT cs.site_id, cs.lcn, cs.confidence, c.id AS carrier_id, c.freq_hz, c.variant, c.dominant_cc, c.last_seen"
-            " FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id ORDER BY c.freq_hz")]
-        links = [dict(r) for r in store.rows(
-            "SELECT l.*, a.freq_hz AS a_freq, b.freq_hz AS b_freq FROM links l JOIN carriers a ON a.id = l.a_carrier_id"
-            " JOIN carriers b ON b.id = l.b_carrier_id ORDER BY l.score DESC")]
-    links = [l for l in links if LABEL_RANK.get(l["label"], 3) <= max_rank]
-    if args.json:
-        print(json.dumps({"systems": systems, "sites": sites, "carriers": members, "links": links}, indent=2))
-        return 0
-    if not systems:
-        print("no systems yet: run `mapper correlate` after ingesting")
-        return 0
-    for sy in systems:
-        print(f"system {sy['id']}: {sy['label']}  [{sy['variant']}]" + (f"  sys={sy['sys_code']}" if sy["sys_code"] else "")
-              + (f"  net={sy['net_id']}" if sy["net_id"] is not None else ""))
-        for si in [x for x in sites if x["system_id"] == sy["id"]]:
-            flag = "" if si["directly_observed"] else "  (announced only)"
-            print(f"  site {si['id']}: {si['label']}{flag}")
-            for m in [x for x in members if x["site_id"] == si["id"]]:
-                lcn = f" LCN {m['lcn']}" if m["lcn"] else ""
-                print(f"    {m['freq_hz'] / 1e6:10.4f} MHz  {m['variant']:8s} cc={m['dominant_cc']}{lcn}  last {datetime.fromtimestamp(m['last_seen'], tz=timezone.utc):%Y-%m-%d}")
-    print(f"links (>= {args.min_label}): {len(links)}")
-    for l in links:
-        t2 = "  Tier II only" if l["tier2_only"] else ""
-        print(f"  #{l['id']:<4d} {l['a_freq'] / 1e6:.4f} - {l['b_freq'] / 1e6:.4f}  {l['kind']:14s} {l['label']:9s} {l['score']:.2f}{t2}")
+        data, text = systems_report(store, args.min_label)
+    print(json.dumps(data, indent=2) if args.json else text)
     return 0
 
 
@@ -173,8 +146,16 @@ def cmd_explain(args: argparse.Namespace) -> int:
 
 def cmd_export(args: argparse.Namespace) -> int:
     from .export import build, to_json, write, write_graphml
+    from .export.report import export_all
 
     cfg = load_config(args.config)
+    if args.all:
+        with _open_store(args, cfg) as store:
+            paths, g = export_all(store, cfg, Path(args.dir) if args.dir else None, args.min_label)
+        for p in paths:
+            print(f"wrote {p}")
+        print(f"{g.number_of_nodes()} nodes, {g.number_of_edges()} edges (>= {args.min_label})")
+        return 0
     with _open_store(args, cfg) as store:
         g = build(store, min_label=args.min_label)
     exports = resolve_path(cfg, "exports")
@@ -191,6 +172,19 @@ def cmd_export(args: argparse.Namespace) -> int:
         Path(args.json_path).write_text(json.dumps(to_json(g), indent=2), encoding="utf-8")
         print(f"wrote {args.json_path}")
     print(f"{g.number_of_nodes()} nodes, {g.number_of_edges()} edges (>= {args.min_label})")
+    return 0
+
+
+def cmd_snapshot(args: argparse.Namespace) -> int:
+    from .db.snapshot import snapshot
+
+    cfg = load_config(args.config)
+    keep = args.keep if args.keep is not None else int((cfg.get("archive", {}) or {}).get("keep_local", 3))
+    out = Path(args.dir) if args.dir else resolve_path(cfg, "snapshots")
+    path, removed = snapshot(_db_path(args, cfg), out, keep, str(cfg.get("timezone") or "UTC"))
+    print(f"wrote {path} ({path.stat().st_size / 1e6:.1f} MB)")
+    for r in removed:
+        print(f"removed {r}")
     return 0
 
 
@@ -217,8 +211,13 @@ def _db_path(args: argparse.Namespace, cfg: dict) -> Path:
 
 
 def cmd_daemon(args: argparse.Namespace) -> int:
+    import logging
+
     from .collector.daemon import run_daemon
 
+    # systemd's journal adds the time; a terminal run gets it from the format
+    fmt = "%(levelname)s %(message)s" if os.environ.get("INVOCATION_ID") else "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt, stream=sys.stderr)
     cfg = load_config(args.config)
     path = _db_path(args, cfg)
     print(f"daemon on {path} (config {cfg.get('_source')}); Ctrl-C or SIGTERM to stop", file=sys.stderr)
@@ -418,6 +417,13 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         line(True, "database", f"{path} schema v{store.schema_version()} {size / 1e6:.1f} MB")
         status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
         line(None, "daemon", f"{'alive' if status.alive else 'not running'}" + (f", mode {status.mode}" if status.alive else ""))
+    if shutil.which("systemctl"):
+        for unit in ("dmr-mapper.service", "dmr-mapper-snapshot.timer"):
+            r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True)
+            state = r.stdout.strip() or "unknown"
+            line(state == "active" or None, unit, state + ("" if state == "active" else " (install with deploy/deploy.sh)"))
+    snaps = sorted(resolve_path(cfg, "snapshots").glob("mapper-*.db"))
+    line(None, "snapshots", f"{len(snaps)}, newest {snaps[-1].name}" if snaps else "none yet")
     bands = cfg.get("survey", {}).get("bands", [])
     line(bool(bands), "survey bands", ", ".join(f"{b.get('name')} {b.get('start_hz', 0) / 1e6:.1f}-{b.get('stop_hz', 0) / 1e6:.1f} MHz" for b in bands))
     return 0 if ok_all else 1
@@ -465,7 +471,14 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--graphml", help="also write GraphML")
     xp.add_argument("--json-path", help="also write the graph as JSON")
     xp.add_argument("--min-label", default="possible", choices=["confirmed", "probable", "possible", "weak"])
+    xp.add_argument("--all", action="store_true", help="map.html, map.json, map.graphml and systems.txt into the exports folder")
+    xp.add_argument("--dir", help="with --all: write here instead of paths.exports")
     xp.set_defaults(func=cmd_export)
+
+    sn = sub.add_parser("snapshot", help="consistent copy of the database for the archive (VACUUM INTO), keeps the newest N")
+    sn.add_argument("--dir", help="default: paths.snapshots")
+    sn.add_argument("--keep", type=int, help="snapshots kept locally (default: archive.keep_local)")
+    sn.set_defaults(func=cmd_snapshot)
 
     pr = sub.add_parser("propose", help="record manual evidence for a link between two carriers")
     pr.add_argument("a_freq", type=int)

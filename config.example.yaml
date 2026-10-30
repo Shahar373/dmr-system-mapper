@@ -7,7 +7,8 @@
 paths:
   db: var/mapper.db            # the only persistent store; tens of MB for months of data
   raw_logs: var/raw            # DSD-FME raw logs, only written when decode.keep_raw_logs is true
-  exports: var/exports         # graph exports (HTML, GraphML, JSON)
+  exports: var/exports         # graph exports (HTML, GraphML, JSON, systems.txt)
+  snapshots: var/snapshots     # nightly consistent copies of the database; the archive Pi pulls this folder
 
 timezone: Asia/Jerusalem       # display only; the database stores UTC epoch seconds
 
@@ -98,12 +99,10 @@ correlator:
     possible: 0.30
   tier2_max_confidence: 0.60   # links supported only by Tier II evidence never exceed this
 
-archive:
-  enabled: false
-  host: archive-pi.tailnet     # second Pi, reachable over Tailscale only
-  user: pi
-  path: /srv/dmr-mapper/
-  hour: "03:30"                # nightly rsync of the SQLite file (local time)
+archive:                       # the archive Pi PULLS paths.snapshots (deploy/archive-pull.sh, read-only key);
+                               # this Pi never needs to know the archive's address
+  snapshot_time: "03:30"       # local time of the nightly snapshot + export (systemd timer; runs at boot if missed)
+  keep_local: 3                # snapshots kept on this Pi (SD card); the archive keeps its own history
 
 mcp:
   bind: 100.64.0.1             # the Pi's Tailscale address; set it in config.local.yaml

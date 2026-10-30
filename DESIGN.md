@@ -59,7 +59,7 @@ inspects evidence and may *propose* links; a proposal is just one more evidence 
 | `mapper correlate` / `systems` / `explain` / `export` | laptop / Pi | 2 | Evidence engine, reports, NetworkX + static HTML |
 | `mapper daemon` | Pi (systemd) | 3a | Idle until asked; survey and decode sessions with a time budget; single writer of decoded data |
 | `mapper tui` | Pi, over SSH | 3a | Operator console: status, start/stop, carriers, survey hits, systems, sessions |
-| deployment | Pi | 3b | systemd unit, `deploy.sh`, nightly DB snapshot for the archive Pi |
+| deployment | Pi | 3b | `dmr-mapper` systemd service, `deploy/deploy.sh`, nightly snapshot/export timer, archive Pi pulls with a read-only `rrsync` key (DEPLOY.md) |
 | MCP server | Pi (HTTP over Tailscale) | 4 | Tools for Claude Code on the laptop |
 
 The daemon, the console and the CLI share one library (`dmr_mapper`) and one database. The
@@ -567,10 +567,12 @@ few minutes per hour, 90 days.
 | evidence + links | recomputed in place | — | < 1 MB |
 | survey_hits | 2 bands × 48 runs × ~60 hits ≈ 5 800 | ~50 | ~26 MB → prune to last 14 days (~4 MB) |
 
-Total ≈ **20–35 MB for 90 days** with `survey_hits` pruning and a weekly `VACUUM`. Raw DSD-FME logs
+Total ≈ **20–35 MB for 90 days** with `survey_hits` pruning (after every session); SQLite reuses the freed pages. Raw DSD-FME logs
 are kept only when `decode.keep_raw_logs` is true, with rotation `raw_log_max_mb × raw_log_keep`
-(default 250 MB cap). The nightly rsync copies only the SQLite file (via a consistent
-`VACUUM INTO` snapshot) to the archive Pi.
+(default 250 MB cap), compressed, named like manual captures so `mapper ingest` replays them. Every night
+(or at the next boot) a timer writes a consistent `VACUUM INTO` snapshot, checked with `quick_check`,
+to `var/snapshots/` (newest `archive.keep_local` kept on the SD card); the archive Pi **pulls** that
+folder with a key restricted to read-only rsync of it, and keeps 14 daily + 8 weekly copies.
 
 ## 10. MCP tools
 
@@ -611,7 +613,7 @@ dmr_mapper/            package (phases 1–4)
   collector/ (Phase 3a)  tui/ (Phase 3a)  mcp/ (Phase 4)
 tests/                 pytest, fixtures from samples/ + tests/fixtures/synthetic/
 samples/               checked-in DSD-FME logs (see README)
-deploy/                systemd units, deploy.sh, rsync (Phase 3)
+deploy/                systemd unit templates, deploy.sh, archive-pull.sh (Phase 3b)
 DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 ```
 

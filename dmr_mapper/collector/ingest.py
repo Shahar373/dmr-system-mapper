@@ -27,6 +27,10 @@ class CarrierIngest:
         self.stats = IngestStats(source=source, path=None, freq_hz=freq_hz, carrier_id=self.carrier_id)
         self.parser = LineParser(ctx)
         self.agg = Aggregator(store, self.carrier_id, source, int(cfg.get("ingest", {}).get("bucket_minutes", 15)), self.stats, snr_db=snr_db)
+        self.raw = None
+        if (cfg.get("decode", {}) or {}).get("keep_raw_logs"):
+            from .rawlog import RawLog, raw_dir
+            self.raw = RawLog(raw_dir(cfg), freq_hz, cfg)
         self.pos_syncs = 0
         self.neg_syncs = 0
         self.lines = 0
@@ -34,6 +38,8 @@ class CarrierIngest:
 
     def feed(self, line: str) -> None:
         self.lines += 1
+        if self.raw is not None:
+            self.raw.write(line if line.endswith("\n") else line + "\n")
         if "Sync: +DMR" in line:
             self.pos_syncs += 1
         elif "Sync: -DMR" in line:
@@ -48,6 +54,8 @@ class CarrierIngest:
         if self.finished:
             return self.stats
         self.finished = True
+        if self.raw is not None:
+            self.raw.close()
         for ev in self.parser.finish():
             self.agg.feed(ev)
         self.agg.flush()

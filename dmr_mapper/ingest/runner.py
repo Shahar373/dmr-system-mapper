@@ -142,6 +142,18 @@ def ingest_log_file(
         start_time = datetime.fromtimestamp(path.stat().st_mtime, tz=tz)
         note = (note + "; " if note else "") + "no date in the file name: using the file's modification time"
     ctx = ParseContext(freq_hz=freq, start_time=start_time, source=source, time_is_rf=True, tz=tz)
+    if path.name.endswith(".gz"):
+        # a compressed raw log from the collector never grows: ingest it whole, and record its
+        # compressed size as the offset so the idempotence check above sees it as complete
+        import gzip
+        with gzip.open(path, "rt", encoding="utf-8", errors="replace") as fh:
+            st = ingest_lines(store, fh, ctx, cfg, path=str(path), fingerprint=fp, byte_counter=[0])
+        store.conn.execute("UPDATE ingest_runs SET byte_offset = ? WHERE id = (SELECT MAX(id) FROM ingest_runs WHERE fingerprint = ?)",
+                           (size, fp))
+        store.commit()
+        if note:
+            st.note = note
+        return st
     counter = [offset]
     with path.open("r", encoding="utf-8", errors="replace") as fh:
         if offset:
@@ -241,7 +253,7 @@ def ingest_path(
     if is_surveyor_tree(path):
         return ingest_surveyor(store, path, cfg, force)
     results: list[IngestStats] = []
-    for log in sorted(path.rglob("*.log")):
+    for log in sorted([*path.rglob("*.log"), *path.rglob("*.log.gz")]):
         if log.stat().st_size == 0:
             continue
         try:

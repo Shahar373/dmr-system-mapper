@@ -13,6 +13,7 @@ Clients never call into this module; they post rows to ``commands`` (see ``state
 from __future__ import annotations
 
 import json
+import logging
 import os
 import queue
 import signal
@@ -35,6 +36,9 @@ from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
 from .survey import latest_hits, record, sweep
+
+
+log = logging.getLogger("dmr_mapper.daemon")
 
 
 class SessionStop(Exception):
@@ -104,6 +108,7 @@ class Daemon:
             raise
         self._install_signals()
         self.message = "started"
+        log.info("daemon started: pid %s, database %s, receiver backend %s", self.pid, self.db_path, type(self.backend).__name__)
         try:
             while not self.stop_event.is_set():
                 try:
@@ -117,6 +122,7 @@ class Daemon:
                 self.session_stop.set()
                 self.session_thread.join(timeout=15)
             st.mark_offline(self._store, self.pid)
+            log.info("daemon stopped")
         finally:
             self._store.close()
             self._release_lock()
@@ -135,8 +141,11 @@ class Daemon:
         assert self._store is not None
         now = time.monotonic()
         if now - self._last_power >= 10:
+            before = self.power.short() if self.power.checked else None
             self.power = read_power(self.cfg)
             self._last_power = now
+            if before != self.power.short():
+                log.info("power: %s (source %s)", self.power.short(), self.power.source)
             if self.session_thread is not None and self.session_thread.is_alive() and self.power.undervolt_now \
                     and (self.cfg.get("power", {}) or {}).get("stop_on_undervoltage", True):
                 self.message = "stopping session: undervoltage reported by the firmware"
@@ -154,7 +163,12 @@ class Daemon:
             cmd = st.take_command(self._store)
             if cmd is None:
                 break
-            ok, result = self._handle(cmd)
+            try:
+                ok, result = self._handle(cmd)
+            except Exception as exc:  # noqa: BLE001 - a bad command must not kill the daemon
+                ok, result = False, f"{type(exc).__name__}: {exc}"
+                log.exception("command %s failed", cmd["kind"])
+            (log.info if ok else log.warning)("command %s from %s: %s", cmd["kind"], cmd.get("source"), result)
             st.finish_command(self._store, int(cmd["id"]), ok, result)
         with self._lock:
             progress = dict(self.progress)
@@ -163,9 +177,12 @@ class Daemon:
 
     def _probe(self) -> SdrStatus:
         try:
-            return self.backend.probe()
+            status = self.backend.probe()
         except Exception as exc:  # noqa: BLE001
-            return SdrStatus("error", None, None, None, str(exc)[:200], int(time.time()))
+            status = SdrStatus("error", None, None, None, str(exc)[:200], int(time.time()))
+        if status.status != self.sdr.status or status.holder != self.sdr.holder:
+            log.info("receiver: %s%s", status.short(), f" [{status.detail}]" if status.detail else "")
+        return status
 
     # -- commands ----------------------------------------------------------------------------------
     def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str]:
@@ -214,12 +231,10 @@ class Daemon:
             rep = correlate(self._store, self.cfg)
             return True, f"links {rep.links_scored} ({rep.links_by_label}), sites {rep.sites}, systems {rep.systems}"
         if kind == "export":
-            from ..config import resolve_path
-            from ..export import build, write
-            path = params.get("path") or str(resolve_path(self.cfg, "exports") / "map.html")
-            g = build(self._store, min_label=str(params.get("min_label", "possible")))
-            write(g, path)
-            return True, f"wrote {path} ({g.number_of_nodes()} nodes, {g.number_of_edges()} edges)"
+            from ..export.report import export_all
+            paths, g = export_all(self._store, self.cfg, Path(params["dir"]) if params.get("dir") else None,
+                                  str(params.get("min_label", "weak")))
+            return True, f"wrote {paths[0].parent}/ (map.html, map.json, map.graphml, systems.txt; {g.number_of_nodes()} nodes, {g.number_of_edges()} edges)"
         return False, f"unknown command {kind}"
 
     # -- sessions ----------------------------------------------------------------------------------
@@ -260,6 +275,7 @@ class Daemon:
             st.finish_session(store, sid, status, summary)
             store.close()
             self.message = f"{kind} session #{sid} {status} after {summary['elapsed_s']:.0f} s"
+            log.info("%s%s", self.message, f": {summary.get('error')}" if summary.get("error") else "")
             self.mode = "idle"
 
     def _check(self, t0: float, budget_s: int) -> None:

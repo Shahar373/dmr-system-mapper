@@ -1,0 +1,12 @@
+# Rendered by deploy/deploy.sh: @TIME@ comes from archive.snapshot_time in the config.
+[Unit]
+Description=Nightly dmr-system-mapper snapshot
+
+[Timer]
+OnCalendar=*-*-* @TIME@:00
+# the Pi is often off at night in the field: run at the next boot instead
+Persistent=true
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

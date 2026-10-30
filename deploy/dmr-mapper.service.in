@@ -1,0 +1,26 @@
+# Rendered by deploy/deploy.sh: @USER@, @GROUP@ and @REPO@ are filled in on the Pi.
+[Unit]
+Description=dmr-system-mapper collector daemon (idle until a survey or decode session is started)
+Documentation=file://@REPO@/DEPLOY.md
+After=network-online.target sdrplay.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/.venv/bin/mapper daemon
+Environment=PYTHONUNBUFFERED=1
+# SIGTERM ends a running session cleanly (the receiver is closed, the session is marked stopped)
+KillSignal=SIGTERM
+TimeoutStopSec=30
+Restart=on-failure
+RestartSec=15
+# leave CPU and SD-card time to the other services on the Pi
+Nice=5
+IOSchedulingClass=best-effort
+IOSchedulingPriority=6
+
+[Install]
+WantedBy=multi-user.target

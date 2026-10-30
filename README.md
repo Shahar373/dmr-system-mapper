@@ -41,6 +41,8 @@ investigation only.
   combination, component interfaces, configuration, storage budget, MCP tool list.
 - [CAPTURE.md](CAPTURE.md): the exact DSD-FME command line for the Pi and for manual captures,
   and the log line formats the parser depends on.
+- [DEPLOY.md](DEPLOY.md): installing and updating the service on the Pi, daily use, getting data off,
+  the archive Pi, debugging, restoring.
 - [config.example.yaml](config.example.yaml): all settings with comments. Copy to
   `config.local.yaml` (git-ignored) for machine-specific values; never commit Tailscale addresses,
   device serials or paths.
@@ -54,7 +56,7 @@ investigation only.
 | 2 | `mapper correlate` / `systems` / `explain` / `export`: evidence engine, NetworkX graph, static HTML | done |
 | 2.1 | Review fixes: site ids on the upsert path, live ingest commits per event, `correlate` output, `window_days` in config | done |
 | 3a | `mapper daemon` / `tui` / `survey` / `decode` / `doctor`: on-demand sessions with a time budget, band survey, FFT channelizer, DSD-FME decode, single-writer live ingest, Textual console | done |
-| 3b | Deployment on the Pi: systemd unit, `deploy.sh` (git pull on the Pi), nightly DB snapshot pulled by the archive Pi, first hardware run | planned |
+| 3b | Deployment: `dmr-mapper` systemd service, `deploy/deploy.sh` (pull, install, restart), nightly snapshot + export timer, read-only archive pull, size-capped raw debug logs, `mapper snapshot` / `export --all` | done (first install on the Pi pending) |
 | 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
 
 Each phase ends with a commit to `main` and waits for approval.
@@ -143,6 +145,14 @@ mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: pl
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions
 mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
+```
+
+On the Pi the daemon is a systemd service installed by `deploy/deploy.sh` (see [DEPLOY.md](DEPLOY.md)),
+and `mapper` works from any folder. Exports and archive copies:
+
+```sh
+mapper export --all              # map.html, map.json, map.graphml, systems.txt in var/exports/
+mapper snapshot                  # consistent copy of the database in var/snapshots/ (nightly by timer)
 ```
 
 A decode session plans from the latest survey: carriers never decoded, strong, stale, or of a
