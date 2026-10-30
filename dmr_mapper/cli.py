@@ -394,7 +394,8 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     if exe:
         try:
             out = subprocess.run([exe, "-h"], capture_output=True, text=True, timeout=5)
-            ver = next((l.strip() for l in (out.stdout + out.stderr).splitlines() if "version" in l.lower() or "build" in l.lower()), "")
+            text = (out.stdout + out.stderr).splitlines()
+            ver = next((l.strip() for l in text if l.strip().lower().startswith("build version")), "")
         except (OSError, subprocess.SubprocessError) as exc:
             ver = f"found but failed to run: {exc}"
         line(True, "dsd-fme", f"{exe} {ver}".strip())
