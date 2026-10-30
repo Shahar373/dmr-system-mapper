@@ -298,7 +298,22 @@ class SoapyBackend:
         return SdrStatus("absent", self.driver, self.serial or None, None, None, now)
 
     def open(self) -> IQSource:
-        return SoapySource(self.cfg, self._args())
+        """Open exactly the device the driver lists (its full argument set, as SoapySDRUtil does):
+        a bare ``driver=sdrplay`` can fail to match on some SoapySDRPlay builds."""
+        import SoapySDR  # type: ignore[import-not-found]
+
+        found = [dict(f) for f in SoapySDR.Device.enumerate(self._args())]
+        if not found:
+            users = sdr_users(self.cfg)
+            raise RuntimeError("the driver lists no free receiver"
+                               + (f"; in use by {'; '.join(users)}" if users else "; another program may have it open"))
+        last: Exception | None = None
+        for args in found:
+            try:
+                return SoapySource(self.cfg, {k: str(v) for k, v in args.items()})
+            except Exception as exc:  # noqa: BLE001
+                last = exc
+        raise RuntimeError(f"{last} (tried {found})")
 
 
 SDR_LIBRARIES = ("libsdrplay_api", "libsdrPlaySupport", "librtlsdr", "libairspy", "libhackrf", "libSoapySDR")

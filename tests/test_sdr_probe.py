@@ -31,6 +31,9 @@ def _fake_soapy(monkeypatch, found: list, open_raises: Exception | None = None):
         def enumerate(args):
             return found
 
+        def setSampleRate(self, *a):
+            pass
+
         def __init__(self, args):
             opened.append(args)
             if open_raises:
@@ -38,6 +41,7 @@ def _fake_soapy(monkeypatch, found: list, open_raises: Exception | None = None):
 
     mod = types.ModuleType("SoapySDR")
     mod.Device = Device
+    mod.SOAPY_SDR_RX, mod.SOAPY_SDR_CF32 = 0, "CF32"
     monkeypatch.setitem(sys.modules, "SoapySDR", mod)
     return opened
 
@@ -100,3 +104,13 @@ def test_driver_refusal_at_start_is_the_command_result(tmp_path, cfg):
         d.stop_event.set()
         th.join(timeout=10)
         client.close()
+
+
+def test_open_uses_the_full_enumerated_arguments(monkeypatch, cfg):
+    opened = _fake_soapy(monkeypatch, [{"driver": "sdrplay", "serial": "ABC", "label": "RSP1B"}], open_raises=RuntimeError("no match"))
+    with pytest.raises(RuntimeError) as e:
+        SoapyBackend(cfg).open()
+    assert opened == [{"driver": "sdrplay", "serial": "ABC", "label": "RSP1B"}] and "no match" in str(e.value)
+    _fake_soapy(monkeypatch, [])
+    with pytest.raises(RuntimeError, match="no free receiver"):
+        SoapyBackend(cfg).open()
