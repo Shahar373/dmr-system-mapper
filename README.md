@@ -147,7 +147,7 @@ mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool
 
 A decode session plans from the latest survey: carriers never decoded, strong, stale, or of a
 variant that announces its identity come first, and carriers that look like the same Capacity Plus
-site and fit in one 1.9 MHz slice are decoded together with a double dwell, because that is what
+site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double dwell, because that is what
 produces rest-hop evidence. After a decode session the correlator runs. Closing the console never
 stops a session. Development without hardware uses `sdr.source: file` (replay of an IQ recording)
 or the synthetic receiver in the tests.

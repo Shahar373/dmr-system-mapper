@@ -17,7 +17,7 @@ sdr:
   devices:                     # one RSP1B: it alternates survey sweeps and decode dwells.
     - {serial: "", role: any}  # serial from `SoapySDRUtil --find`; add a second entry with
                                # role: survey / role: decode when a second receiver exists
-  sample_rate_hz: 2400000      # capture rate; 2.4 MS/s divides exactly to the 96 kHz channel rate
+  sample_rate_hz: 2000000      # capture rate; must be one the driver offers (SDRplay: 2, 2.048, 3 ... MS/s, not 2.4)
   usable_fraction: 0.8         # share of the capture bandwidth used (filter roll-off at the edges)
   gain:
     ifgr: 40                   # IF gain reduction (dB)

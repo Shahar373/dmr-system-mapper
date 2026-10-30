@@ -83,14 +83,14 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   undervoltage now → one process, and a running session is stopped.
 - **Session budget**: every session ends by itself; `stop` ends it at the next block. The receiver
   is closed in every exit path.
-- **Survey**: steps of `sample_rate × usable_fraction` (1.92 MHz at 2.4 MS/s), Welch PSD per
+- **Survey**: steps of `sample_rate × usable_fraction` (1.6 MHz at 2 MS/s), Welch PSD per
   `segment_s`, channel power on the raster, noise floor = median channel, hit when the 95th
   percentile SNR clears `snr_threshold_db`; neighbours of a strong carrier are suppressed.
   Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`).
 - **Decode**: the scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
   variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
   Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
-  FFT channelizer (overlap-save, 96 kHz per channel, 7.5 kHz low-pass, discriminator, 48 kHz int16,
+  FFT channelizer (overlap-save, sample_rate/D per channel: 80 kHz at 2 MS/s, 7.5 kHz low-pass, discriminator, rational resampling to 48 kHz int16,
   slow level normalisation), one PCM TCP server and one DSD-FME per carrier, stderr of all of them
   into one queue, parsed and written by the session thread, committed after every block so no
   write lock is held. A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is

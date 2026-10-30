@@ -187,7 +187,7 @@ class FileBackend:
         self.path = Path(str(r.get("path") or ""))
         self.fmt = str(r.get("format", "cf32"))
         self.center_hz = float(r.get("center_hz") or 0)
-        self.sample_rate = float(cfg.get("sdr", {}).get("sample_rate_hz", 2_400_000))
+        self.sample_rate = float(cfg.get("sdr", {}).get("sample_rate_hz", 2_000_000))
 
     def probe(self) -> SdrStatus:
         if not self.path.is_file():
@@ -199,6 +199,12 @@ class FileBackend:
 
 
 # -- SoapySDR ---------------------------------------------------------------------------------------
+def device_args_string(args: dict[str, Any]) -> str:
+    """{"driver": "sdrplay", "serial": "X"} → "driver=sdrplay,serial=X" (driver first, empty values dropped)."""
+    keys = sorted(args, key=lambda k: (k != "driver", k))
+    return ",".join(f"{k}={args[k]}" for k in keys if str(args[k]) != "" and k != "label")
+
+
 class SoapySource:
     def __init__(self, cfg: dict[str, Any], device_args: dict[str, str]):
         import SoapySDR  # type: ignore[import-not-found]
@@ -206,9 +212,30 @@ class SoapySource:
 
         self._soapy = SoapySDR
         scfg = cfg.get("sdr", {}) or {}
-        self.sample_rate = float(scfg.get("sample_rate_hz", 2_400_000))
+        self.sample_rate = float(scfg.get("sample_rate_hz", 2_000_000))
         self.center_hz = 0.0
-        self.dev = SoapySDR.Device(device_args)
+        # Device() must get the "key=value,..." string: with a dict, some SoapySDR Python builds
+        # (the Pi's, Debian trixie) fail with "make() no match" although enumerate() finds the device
+        # with the same dict. The surveyor hit the same thing (capture/device.py).
+        self.dev = SoapySDR.Device(device_args_string(device_args))
+        try:
+            rates = [float(r) for r in self.dev.listSampleRates(SOAPY_SDR_RX, 0)]
+        except Exception:  # noqa: BLE001
+            rates = []
+        if rates and self.sample_rate not in rates:
+            # e.g. the SDRplay driver offers 2, 2.048, 3 ... MS/s but not 2.4: take the closest it has
+            from .channelizer import pick_decimation
+            usable = []
+            for r in rates:
+                try:
+                    pick_decimation(r)
+                    usable.append(r)
+                except ValueError:
+                    pass
+            if not usable:
+                raise RuntimeError(f"none of the driver's sample rates {rates} can be channelised")
+            self.requested_rate = self.sample_rate
+            self.sample_rate = min(usable, key=lambda r: abs(r - self.requested_rate))
         self.dev.setSampleRate(SOAPY_SDR_RX, 0, self.sample_rate)
         gain = scfg.get("gain", {}) or {}
         if gain.get("agc"):

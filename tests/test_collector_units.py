@@ -39,7 +39,7 @@ def test_channelizer_recovers_the_modulating_audio():
     for _ in range(20):
         outs.append(ch.process(src.read(ch.hop))[165_300_000])
     y = np.concatenate(outs).astype(np.float32) / 32767
-    assert len(y) == 20 * ch.hop // 50 and AUDIO_RATE == 48_000
+    assert abs(len(y) - 20 * ch.hop // 50) <= 2 and AUDIO_RATE == 48_000
     a = audio[:len(y)]
     corr, delay = max((float(np.corrcoef(a[:len(y) - d], y[d:])[0, 1]), d) for d in range(200, 300))
     assert corr > 0.9, (corr, delay)
@@ -56,7 +56,23 @@ def test_channelizer_rejects_wrong_block_size():
     with pytest.raises(ValueError):
         ch.process(np.zeros(10, dtype=np.complex64))
     with pytest.raises(ValueError):
-        Channelizer(2_000_000, 165_000_000)
+        Channelizer(1_000_003, 165_000_000)
+
+
+@pytest.mark.parametrize("fs", [2_000_000, 2_400_000, 3_000_000])
+def test_channelizer_works_at_the_rates_the_sdrplay_offers(fs):
+    from dmr_mapper.collector.channelizer import pick_decimation
+    D, up, down = pick_decimation(fs)
+    assert 64_000 <= fs / D <= 128_000 and (fs / D) * up / down == 48_000
+    audio = _audio()
+    src = SyntheticSource(fs, 165_000_000, [SynthCarrier(165_300_000, 30, audio)])
+    ch = Channelizer(fs, 165_000_000)
+    ch.set_channels([165_300_000])
+    y = np.concatenate([ch.process(src.read(ch.hop))[165_300_000] for _ in range(10)]).astype(np.float32) / 32767
+    assert abs(len(y) - 10 * ch.hop * 48_000 / fs) <= 10          # 48 kHz out, whatever the capture rate
+    a = audio[:len(y)]
+    corr = max(float(np.corrcoef(a[:len(y) - d], y[d:])[0, 1]) for d in range(0, 600))
+    assert corr > 0.95, (fs, corr)
 
 
 def test_survey_analysis_finds_carriers_on_the_raster():
@@ -160,7 +176,7 @@ def test_file_backend_replay(tmp_path, cfg):
     n = capture_iq(src, 165_000_000, 0.3, out)
     assert n == 720_000 and out.stat().st_size == n * 8
     c = dict(cfg)
-    c["sdr"] = dict(cfg["sdr"], source="file", replay={"path": str(out), "format": "cf32", "center_hz": 165_000_000})
+    c["sdr"] = dict(cfg["sdr"], sample_rate_hz=2_400_000, source="file", replay={"path": str(out), "format": "cf32", "center_hz": 165_000_000})
     b = FileBackend(c)
     assert b.probe().status == "present"
     fs = b.open()

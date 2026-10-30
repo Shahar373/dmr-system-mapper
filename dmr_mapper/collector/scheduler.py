@@ -117,7 +117,7 @@ def _score(t: Target, now: int) -> None:
 
 def plan(targets: list[Target], cfg: dict[str, Any], max_instances: int, sample_rate: float | None = None) -> list[Slice]:
     sdr = cfg.get("sdr", {}) or {}
-    fs = float(sample_rate or sdr.get("sample_rate_hz", 2_400_000))
+    fs = float(sample_rate or sdr.get("sample_rate_hz", 2_000_000))
     usable = fs * float(sdr.get("usable_fraction", 0.8))
     dwell = int((cfg.get("decode", {}) or {}).get("seconds_per_carrier", 60))
     remaining = sorted(targets, key=lambda t: t.freq_hz)

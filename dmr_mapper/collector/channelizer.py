@@ -18,7 +18,7 @@ import numpy as np
 from scipy import fft as sfft
 from scipy import signal as ss
 
-CHANNEL_RATE = 96_000
+CHANNEL_RATE = 96_000      # preferred channel rate; the actual one is sample_rate / D (see pick_decimation)
 AUDIO_RATE = 48_000
 CHANNEL_LOWPASS_HZ = 7_500
 EDGE_HZ = 8_000            # raised-cosine transition at the band edge of the 96 kHz slice
@@ -39,17 +39,39 @@ class ChannelState:
     level_db: float = -120.0          # channel power relative to full scale, for diagnostics
     phase: float = 0.0
     samples_out: int = 0
+    dec_phase: int = 0                # where the next kept sample falls in the upsampled stream
     stats: dict = field(default_factory=dict)
+
+
+def pick_decimation(fs: float) -> tuple[int, int, int]:
+    """(D, up, down): channel rate fs/D between 64 and 128 kHz, an integer, and as cheap as
+    possible to resample to 48 kHz (smallest up+down). 2.4 MS/s → (25, 1, 2); 2 MS/s → (25, 3, 5)."""
+    from fractions import Fraction
+
+    best: tuple[int, int, int, int] | None = None
+    for D in range(2, 400):
+        cr = fs / D
+        if not (64_000 <= cr <= 128_000) or abs(cr - round(cr)) > 1e-6:
+            continue
+        fr = Fraction(AUDIO_RATE, int(round(cr)))
+        if fr.denominator > 50:
+            continue
+        cost = fr.numerator + fr.denominator
+        if best is None or cost < best[0]:
+            best = (cost, D, fr.numerator, fr.denominator)
+    if best is None:
+        raise ValueError(f"sample rate {fs} cannot be channelised to 48 kHz audio (pick e.g. 2000000 or 2400000)")
+    return best[1], best[2], best[3]
 
 
 class Channelizer:
     def __init__(self, sample_rate: float, center_hz: float, hop: int | None = None):
-        if sample_rate % CHANNEL_RATE:
-            raise ValueError(f"sample rate {sample_rate} must be a multiple of {CHANNEL_RATE}")
         self.fs = float(sample_rate)
         self.center_hz = float(center_hz)
-        self.D = int(sample_rate // CHANNEL_RATE)           # 25 at 2.4 MS/s
+        self.D, self.up, self.down = pick_decimation(self.fs)
+        self.cr = self.fs / self.D                          # channel rate: 96 kHz at 2.4 MS/s, 80 kHz at 2 MS/s
         self.hop = hop or int(self.fs // 10)                # 0.1 s
+        self.hop -= self.hop % self.D
         # ~10 ms of overlap (>> the raised-cosine impulse response), chosen so that N has small
         # prime factors: 240000 + 22500 = 262500 = 2^2 3 5^5 7, which the FFT likes.
         self.overlap = int(self.fs * 0.009375)
@@ -61,13 +83,14 @@ class Channelizer:
         # output block b covers absolute samples [n0_b + overlap/2, n0_b + overlap/2 + hop): contiguous
         self._taper = self._make_taper()
         self.channels: dict[float, ChannelState] = {}
-        self._lp = ss.firwin(65, CHANNEL_LOWPASS_HZ, fs=CHANNEL_RATE).astype(np.float32)
-        self._dec = ss.firwin(31, 18_000, fs=CHANNEL_RATE).astype(np.float32)
+        self._lp = ss.firwin(65, CHANNEL_LOWPASS_HZ, fs=self.cr).astype(np.float32)
+        # rational resampler cr → 48 kHz: zero-stuff by ``up``, low-pass, keep every ``down``-th sample
+        self._dec = (ss.firwin(31 * max(self.up, 1) | 1, min(18_000, AUDIO_RATE * 0.4), fs=self.cr * self.up) * self.up).astype(np.float32)
         self._bin_hz = self.fs / self.N
 
     def _make_taper(self) -> np.ndarray:
-        f = np.fft.fftfreq(self.M, d=1.0 / CHANNEL_RATE)
-        half = CHANNEL_RATE / 2
+        f = np.fft.fftfreq(self.M, d=1.0 / self.cr)
+        half = self.cr / 2
         t = np.ones(self.M)
         edge = (np.abs(f) > half - EDGE_HZ)
         t[edge] = 0.5 * (1 + np.cos(np.pi * (np.abs(f[edge]) - (half - EDGE_HZ)) / EDGE_HZ))
@@ -110,17 +133,23 @@ class Channelizer:
             ch *= np.exp(-2j * np.pi * ((st.bin_center * n0) % self.N) / self.N).astype(np.complex64)
             if st.residual_hz:
                 n = np.arange(len(ch))
-                ch = ch * np.exp(-2j * np.pi * (st.residual_hz / CHANNEL_RATE) * n + 1j * st.phase).astype(np.complex64)
-                st.phase = float((st.phase - 2 * np.pi * st.residual_hz / CHANNEL_RATE * len(ch)) % (2 * np.pi))
+                ch = ch * np.exp(-2j * np.pi * (st.residual_hz / self.cr) * n + 1j * st.phase).astype(np.complex64)
+                st.phase = float((st.phase - 2 * np.pi * st.residual_hz / self.cr * len(ch)) % (2 * np.pi))
             ch, st.lp_zi = ss.lfilter(self._lp, 1.0, ch, zi=st.lp_zi)
             power = float(np.mean(np.abs(ch) ** 2))
             st.level_db = 10 * np.log10(power + 1e-20)
             # FM discriminator in Hz
             prev = np.concatenate([[st.last_sample], ch[:-1]])
             st.last_sample = complex(ch[-1])
-            dev_hz = (np.angle(ch * np.conj(prev)) * (CHANNEL_RATE / (2 * np.pi))).astype(np.float32)
-            dev_hz, st.dec_zi = ss.lfilter(self._dec, 1.0, dev_hz, zi=st.dec_zi)
-            audio = dev_hz[::2]
+            dev_hz = (np.angle(ch * np.conj(prev)) * (self.cr / (2 * np.pi))).astype(np.float32)
+            if self.up > 1:
+                stuffed = np.zeros(len(dev_hz) * self.up, dtype=np.float32)
+                stuffed[::self.up] = dev_hz
+            else:
+                stuffed = dev_hz
+            filt, st.dec_zi = ss.lfilter(self._dec, 1.0, stuffed, zi=st.dec_zi)
+            audio = filt[st.dec_phase::self.down]
+            st.dec_phase = (st.dec_phase - len(stuffed)) % self.down
             # slow normalisation: 99.5th percentile of |deviation| → PEAK_FRACTION of full scale
             p = float(np.percentile(np.abs(audio), 99.5)) if len(audio) else st.gain_hz
             p = min(GAIN_CEIL_HZ, max(GAIN_FLOOR_HZ, p))

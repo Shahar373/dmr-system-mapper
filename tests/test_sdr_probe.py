@@ -110,7 +110,13 @@ def test_open_uses_the_full_enumerated_arguments(monkeypatch, cfg):
     opened = _fake_soapy(monkeypatch, [{"driver": "sdrplay", "serial": "ABC", "label": "RSP1B"}], open_raises=RuntimeError("no match"))
     with pytest.raises(RuntimeError) as e:
         SoapyBackend(cfg).open()
-    assert opened == [{"driver": "sdrplay", "serial": "ABC", "label": "RSP1B"}] and "no match" in str(e.value)
+    assert opened == ["driver=sdrplay,serial=ABC"] and "no match" in str(e.value)
     _fake_soapy(monkeypatch, [])
     with pytest.raises(RuntimeError, match="no free receiver"):
         SoapyBackend(cfg).open()
+
+
+def test_device_args_string():
+    from dmr_mapper.collector.sdr import device_args_string
+    assert device_args_string({"serial": "240404AF60", "driver": "sdrplay", "label": "SDRplay Dev0 RSP1B 240404AF60"}) == "driver=sdrplay,serial=240404AF60"
+    assert device_args_string({"driver": "sdrplay", "serial": ""}) == "driver=sdrplay"
