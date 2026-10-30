@@ -14,6 +14,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from rich.markup import escape
 from textual import on
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -117,7 +118,9 @@ class MapperApp(App[None]):
         self.store: Store | None = None
         self._seen_commands: set[int] = set()
         self._systems_sig: str | None = None
-        self._selected: tuple[str, int] | None = None      # ("system"|"site", id) highlighted in the Systems tree
+        # ("system"|"site", id, a carrier's frequency) highlighted in the Systems tree; ids change with
+        # every correlator run, the frequency does not, so naming goes by the frequency when there is one
+        self._selected: tuple[str, int, int | None] | None = None
         self._stale_s = int((cfg.get("daemon", {}) or {}).get("heartbeat_stale_s", 10))
 
     # -- layout -----------------------------------------------------------------------------------
@@ -193,7 +196,7 @@ class MapperApp(App[None]):
             " LEFT JOIN systems sy ON sy.id = s.system_id ORDER BY c.freq_hz")
         self._fill(t, [(
             _mhz(r["freq_hz"]), r["variant"], f"{r['variant_confidence']:.2f}", "-" if r["dominant_cc"] is None else str(r["dominant_cc"]),
-            "-" if r["site_number"] is None else str(r["site_number"]), r["system_label"] or "-", _ago(r["last_seen"]),
+            "-" if r["site_number"] is None else str(r["site_number"]), escape(r["system_label"] or "-"), _ago(r["last_seen"]),
             f"{float(r['secs'] or 0):.0f}", str(r["bursts"] or 0)) for r in rows], [str(r["freq_hz"]) for r in rows])
 
     def _refresh_hits(self) -> None:
@@ -219,11 +222,15 @@ class MapperApp(App[None]):
         self._systems_sig = sig
         tree.clear()
         tree.root.set_label(f"{len(systems)} systems")
+        site_freq = {}
+        for m in members:
+            site_freq.setdefault(m["site_id"], m["freq_hz"])
         for sy in systems:
-            n = tree.root.add(f"{display(sy['name'], sy['label'])}  [{sy['variant']}]", data=("system", sy["id"]), expand=True)
+            ref = next((site_freq[si["id"]] for si in sites if si["system_id"] == sy["id"] and si["id"] in site_freq), None)
+            n = tree.root.add(f"{escape(display(sy['name'], sy['label']))}  \\[{sy['variant']}]", data=("system", sy["id"], ref), expand=True)
             for si in [x for x in sites if x["system_id"] == sy["id"]]:
-                label = display(si["name"], si["label"]) + ("" if si["directly_observed"] else "  (announced only)")
-                sn = n.add(label, data=("site", si["id"]), expand=True)
+                label = escape(display(si["name"], si["label"])) + ("" if si["directly_observed"] else "  (announced only)")
+                sn = n.add(label, data=("site", si["id"], site_freq.get(si["id"])), expand=True)
                 for m in [x for x in members if x["site_id"] == si["id"]]:
                     lcn = f"  LCN {m['lcn']}" if m["lcn"] else ""
                     sn.add_leaf(f"{_mhz(m['freq_hz'])} MHz  {m['variant']}  cc={m['dominant_cc']}{lcn}")
@@ -335,13 +342,13 @@ class MapperApp(App[None]):
         log = self.query_one("#log", RichLog)
         if self._selected is None:
             return
-        kind, tid = self._selected
+        kind, tid, ref = self._selected
         try:
-            res = set_name(self.store, kind, str(tid), event.value.strip() or None)
-            log.write(f"{kind} {tid}: " + (f"named [b]{res['name']}[/]" if res["name"] else "name removed")
-                      + (f" (follows {res['anchor']})" if res["anchor"] else " (follows its carriers)"))
-        except (KeyError, ValueError) as exc:
-            log.write(f"[red]{exc.args[0] if exc.args else exc}[/]")
+            res = set_name(self.store, kind, str(ref or tid), event.value.strip() or None)
+            log.write(f"{kind} {res['id']}: " + (f"named [b]{escape(res['name'])}[/]" if res["name"] else "name removed")
+                      + (f" (follows {escape(res['anchor'])})" if res["anchor"] else " (follows its carriers)"))
+        except Exception as exc:  # noqa: BLE001 - a bad name must not take the console down
+            log.write(f"[red]{escape(str(exc.args[0] if exc.args else exc))}[/]")
         event.input.value = ""
         self._systems_sig = None
         self.refresh_all()

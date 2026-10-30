@@ -111,7 +111,8 @@ def render(g: nx.Graph, title: str = "DMR network map", generated_at: int | None
     )
     variants = "".join(f'<li><span class="sw" style="background:{c}"></span>{v}</li>' for v, c in VARIANT_COLOR.items())
     gen = _fmt_ts(generated_at) if generated_at else _fmt_ts(int(datetime.now(tz=timezone.utc).timestamp()))
-    payload = json.dumps(data, ensure_ascii=False).replace("</", "<\\/")
+    # no "<" at all inside the script: names come from the operator ("<!--" would end the script too)
+    payload = json.dumps(data, ensure_ascii=False).replace("<", "\\u003c")
     return f"""<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <title>{html.escape(title)}</title>

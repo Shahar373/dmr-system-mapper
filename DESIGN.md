@@ -101,15 +101,27 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   the most known carriers that fit (control channels count double), or around given carriers or a
   centre, off the DC point. Every 0.1 s block: the power of every raster channel from the
   channelizer's FFT (mean over ±5 kHz), noise floor = median channel, key-up after two blocks over
-  `watch.keyup_snr_db` (a channel 6 dB under its neighbour is that neighbour's skirt), key-down
-  after `hang_s` under `keydown_snr_db`. Control channels are pinned (at most half the instances);
-  a channel that keys up gets a DSD-FME at once, and its audio is first rebuilt from the last
-  `preroll_s` of kept FFT blocks and buffered in the PCM bridge until DSD-FME connects, so the call
-  header before the detection is not lost. One DSD-FME process per transmission, so its lines can
-  only belong to that carrier; one ingest run per carrier per session. A channel decoded for
-  `max_hold_s` gives way to a waiting one. Instances: `watch.max_instances` (6) on mains,
-  `power.battery_watch_instances` (3) on battery, 1 on undervoltage. Key-ups go to `keyups`;
-  a carrier first heard this way is created. Polarity retry is not done in watch sessions.
+  `watch.keyup_snr_db` (a channel 25 dB under its neighbour is that neighbour's skirt), key-down
+  after `hang_s` under `keydown_snr_db`. Known carriers off the 12.5 kHz raster are watched at
+  their own frequency instead of their raster twin; known carriers on the DC point are listed as
+  `blind`. Only known control channels of the network are pinned (at most half the instances, one
+  on battery); a pinned DSD-FME that dies is restarted (3 times). A channel that keys up gets a
+  DSD-FME at once, and its audio is first rebuilt from the last `preroll_s` of kept FFT blocks and
+  buffered in the PCM bridge until DSD-FME connects, so the call header before the detection is not
+  lost. One DSD-FME process per transmission, so its lines can only belong to that carrier; one
+  ingest run per carrier per session, opened when its DSD-FME prints a DMR sync. Who gets a decoder:
+  the network's traffic channels first, then unknown carriers, then carriers known to belong
+  elsewhere (other networks, unpinned control channels); within one class the most recent key-up;
+  a waiting channel takes the decoder of a lower class at once and of its own class after
+  `max_hold_s`, and the one that gave way waits for its key-down. A decoder is retired (bridge
+  closed first, so DSD-FME's read ends and it exits, then the process) in a thread of its own: the
+  block loop never waits. Instances: `watch.max_instances` (6) on mains,
+  `power.battery_watch_instances` (3) on battery, 1 on undervoltage. Key-ups go to `keyups`; a
+  carrier is created by a key-up of at least `min_keyup_s` or a DMR sync, never by a blip. Key-up
+  times are the wall clock when a block is processed, as DSD-FME's own line clock (both lag the air
+  by the same processing delay). The summary reports receiver overflows and the time a block takes
+  (`block_ms_avg` / `block_ms_max` against the 100 ms budget). Polarity retry is not done in watch
+  sessions.
 - **After a decode or watch session** the correlator runs (`daemon.correlate_after_decode`).
 - **One button** (`a` in the console, `mapper survey --then-decode`): a survey, then a decode
   session with whatever is left of the one budget. Sessions are short and random (driving, battery).
@@ -383,9 +395,11 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
   Phase 4 a control channel made hundreds of rows a day).
 - `preamble`, `data_header`, `ip_map`, `lrrp`, `grant`, `activity_update`, `protected_lc`,
   `capplus_rest_change`: one row per distinct payload per carrier per hour.
-- `call` (voice/data call start from the LC: slot, src, tgt) and `capmax_channel_update`: one row
-  per minute, so `behavioral_lsn_table` / `behavioral_lcn_keyup` can align calls with LSN lists and
-  channel updates. `capmax_activity`: per hour.
+- `call` (voice/data call start from the LC: slot, src, tgt): one row per minute, so
+  `behavioral_lsn_table` / `behavioral_lcn_keyup` can align calls with LSN lists and channel updates.
+- `capmax_channel_update`: one row per **assignment** (TG, LCN, slot): updates less than 15 s apart
+  extend it (`last_ts`), so `ts` is when the control channel first announced it. A row per time
+  window would make every window edge look like a new call. `capmax_activity`: per hour.
 - `SLCO Completed Block` and `DMR PDU Payload` lines (with `-Z`) are never stored: they correct or
   complete the event of the line DSD-FME printed before them, or are decoded into one of the kinds
   below; a CSBK nobody decodes is counted per FID/opcode (`csbk_opcodes` in the ingest report) and
@@ -438,10 +452,10 @@ belong to a **class** that carries the config weight and decay constant.
 | `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 2 site 1.2 = `2101`, site 1.3 = `2102`); Con+: same Net ID |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
 | `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
-| `behavioral_lcn_keyup` | behavioral | 0.70 | `(1 − 0.6^n) × agreement`; a call to the TG on the same slot = 1 match, a key-up within ±3 s = ½ shared by all carriers that keyed up then | `same_site` | Cap Max: control channel A announces TG T on LCN L (channel update); carrier B carries the call to T, or keys up, at that moment → B is LCN L of A's site. Carriers whose own short LC names another site are never matched (a group call goes out on every site) |
+| `behavioral_lcn_keyup` | behavioral | 0.70 | `(1 − 0.6^n) × agreement`; per assignment at most one match per carrier: a call to the TG on the same slot during it = 1, else a key-up within ±3 s of its first update = ½ shared by all carriers that keyed up then | `same_site` | Cap Max: control channel A announces TG T on LCN L (channel update); carrier B carries the call to T, or keys up, at that moment → B is LCN L of A's site. Carriers whose own short LC names another site are never matched (a group call goes out on every site) |
 | `identity_radio` | identity | 0.30 | `min(1, shared_radios / 5)` | `same_system` | the same radio ID seen as `src` on both carriers within 24 h |
 | `identity_talkgroup` | identity | 0.15 | `min(1, shared_tgs / 3)` | `same_system` | the same TG on both carriers within 24 h (low: TG numbers are reused across unrelated systems) |
-| `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same short-LC content repeated ≥ 3 times on both carriers, same colour code: an Activity Update (slot activity + hashed address, from DSD-FME's line or from an old `SLCO Completed Block` row: both give one text), an SLCO nothing decodes (`SLCO Unknown`, Cap Max 0xF bits); all-idle updates and short LCs decoded explicitly elsewhere are left out; content present on more than max(4, half) of the carriers counts as a vendor default. Field run 2026-10-30: two VHF Tier II repeaters shared two Activity Updates (the same hashed talkgroups) |
+| `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same short-LC content repeated ≥ 3 times on both carriers, same colour code: an Activity Update (slot activity + hashed address, from DSD-FME's line or from an old `SLCO Completed Block` row: both give one text), an SLCO nothing decodes (`slco <opcode> <data>`, old or new rows; Cap Max 0xF bits); all-idle updates and short LCs decoded explicitly elsewhere are left out, and so is an Activity Update whose hashes are those of talkgroups both carriers were heard carrying (already `identity_talkgroup`); a carrier's count of one content is the largest over the forms it was stored in (old databases hold the line and its block); content present on more than max(4, half) of the carriers counts as a vendor default. Field run 2026-10-30: two VHF Tier II repeaters shared two Activity Updates (the same hashed talkgroups) |
 | `rf_profile` | rf | 0.10 | correlation of activity-per-bucket profiles (Pearson over ≥ 24 shared buckets, clipped to 0..1), only when colour codes match | `same_system` | observations |
 | `manual` | manual | 1.00 | as given by `propose_link` (0..1) | any | MCP / CLI |
 
@@ -529,10 +543,20 @@ rest-channel transitions, 25 LRRP responses and 12 identities, in a 200 KB datab
 **Tier III numbering.** `-D 0` does not do what its help text suggests: DSD-FME reads the value
 as a character, so `0` is 48, clamped to 10. Every Tier III identity then prints as
 `Net ID: net+1; Site ID: 1.site+1` (raw net 1 site 1 = `Net ID: 2; Site ID: 1.2`, SYS `2101`; this is
-the offset against SDRTrunk). But once DSD-FME has decoded one Motorola (FID 0x10) Aloha or
-broadcast it switches the whole process to raw `Net ID: net; Site ID: site`. The parser keeps the
-first numbering throughout: it converts raw prints after that point, and with `-Z` it takes every
-identity from the bytes (the 14-bit system identity code: 2 bits model, then net and site).
+the offset against SDRTrunk; without `-D` the default DMRLA prints the same). But once DSD-FME has
+decoded one Motorola (FID 0x10) Aloha or broadcast it switches the whole process to raw
+`Net ID: net; Site ID: site`. Only the raw print lacks a sub-site, so the parser converts every
+print without one (wherever a log starts), and with `-Z` takes the identities of Alohas, Adjacent_Site
+and Vote_Now from the bytes (the 14-bit system identity code: 2 bits model, then net and site).
+With `-Z` a broadcast is followed by ` SYS: <own>; Reg: …; BParms1: …` (the broadcasting site's own
+code, stored as `own_sys_code`) and an Aloha by ` Ver: …; SF: …; Backoff: …`.
+
+**RAS.** On a system with RAS the CSBK CRC carries a MAC: DSD-FME decodes on FEC alone (it marks the
+burst `{RAS Skip}`), and so does the parser for the raw bytes (`pdu_ras` in the quality counters).
+
+**Time zone.** DSD-FME stamps lines in the local time of the machine it runs on. The collector reads
+its decoders in the system zone; log files given to `mapper ingest` are read in `timezone` from
+config. `mapper doctor` warns when the two differ.
 
 Only Cap+ (three sites) and Tier II are present in `samples/`. Con+, Tier III and XPT parsers are
 written from the DSD-FME source print formats and unit-tested on synthetic lines; they are flagged
@@ -693,6 +717,14 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   those CSBKs failed their CRC or were not sent as this build expects. The raw log will tell.
 - **Activity Update hash** (`rawpdu.address_hash`): CRC-8 of the 16 least significant address
   bits, as DSD-FME computes the Hytera XPT hash; not verified on air.
+- **Advantage mode** channel updates carry 10-bit short talkgroup ids, not the ones calls show:
+  there only key-ups (half matches) teach LCNs. Which mode the 469 MHz network runs is not known.
+- **Names** follow the network identity the announcing carriers give (Tier III model + Net ID,
+  Connect Plus net), whatever the other members are; when no system has it now, the carriers. A
+  system or site with neither cannot be named. Ids change with every correlator run (the daemon
+  runs one after each decode or watch session), so `mapper name` is best given a frequency.
+- **Retention**: unrecognized-line examples (raw lines, raw CSBK bytes) are reduced to their
+  digit-masked pattern after `retention.identity_days`, like the identities they may contain.
 - **Cap+ site numbers are not globally unique.** Two unrelated Cap+ networks can both say
   `Site: 2`. `explicit_same_site` for Cap+ therefore requires the same colour code and a
   frequency distance below `survey.same_site_max_span_hz` (default 5 MHz), and reaches

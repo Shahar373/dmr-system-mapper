@@ -107,9 +107,9 @@ def decode_csbk(b: bytes) -> dict[str, Any]:
     elif out["opcode"] == 40:                                 # C_BCAST
         out["a_type"] = field(v, 80, 16, 5)
         out["own"] = system_identity(field(v, 80, 40, 14))
-        if out["a_type"] == 6:                                # Adjacent_Site; on Capacity Max the channel is an LCN
-            out.update(kind="adjacent_site", neighbor=system_identity(field(v, 80, 21, 14)), channel=field(v, 80, 68, 12),
-                       info_available=bool(field(v, 80, 56, 1)), online=bool(field(v, 80, 57, 1)))
+        if out["a_type"] in (2, 6):                           # Vote_Now / Adjacent_Site; on Capacity Max the channel is an LCN
+            out.update(kind="adjacent_site" if out["a_type"] == 6 else "vote_now", neighbor=system_identity(field(v, 80, 21, 14)),
+                       channel=field(v, 80, 68, 12), info_available=bool(field(v, 80, 56, 1)), online=bool(field(v, 80, 57, 1)))
     elif out["fid"] == 0x10 and out["opcode"] == 0x21:
         lcn = field(v, 80, 16, 12)
         updates = [{"lcn": lcn, "slot": slot, "tg": tg} for slot, tg in ((1, field(v, 80, 32, 24)), (2, field(v, 80, 56, 24))) if tg]

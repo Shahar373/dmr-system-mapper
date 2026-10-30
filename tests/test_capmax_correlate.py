@@ -84,3 +84,26 @@ def test_the_unheard_neighbour_site_carries_its_lcn(capmax_store):
     assert "LCN 5" in unheard[0]["label"]
     systems = capmax_store.rows("SELECT * FROM systems WHERE variant = 'tier3'")
     assert len(systems) == 1 and systems[0]["label"] == "Tier III net 2 (Large)"
+
+
+def test_one_long_call_is_one_match_and_minute_marks_are_not_calls(tmp_path, store, cfg):
+    """A 9-minute call on LCN 7 makes one assignment row; a foreign carrier that keys up just after
+    several minute marks is not tied to the site, and the traffic channel gets one match, not nine."""
+    paths, keyups = capmax_site(tmp_path, net=1, site=1, cc=1, control_freq=CC_A, traffic={7: T7},
+                                calls=[(5, 2102, 1234, 7, 1, 540)], minutes=10)
+    for p in paths:
+        ingest_log_file(store, p, cfg)
+    rows = store.rows("SELECT ts, last_ts FROM csbk_events WHERE kind = 'capmax_channel_update'")
+    assert len(rows) == 1 and rows[0]["last_ts"] - rows[0]["ts"] > 500
+    foreign = store.upsert_carrier(FOREIGN, keyups[0][1])
+    start = (keyups[0][1] // 60 + 1) * 60
+    for k in range(5):
+        store.conn.execute("INSERT INTO keyups (carrier_id, session_id, start, end) VALUES (?, 1, ?, ?)",
+                           (foreign, start + 60 * k + 1, start + 60 * k + 5))
+    store.commit()
+    run(store, cfg, now=NOW)
+    links = _links(store)
+    assert not any(FOREIGN in key[:2] for key in links), [k for k in links if FOREIGN in k[:2]]
+    link = _link(links, T7, CC_A, "same_site")
+    ev = next(e for e in explain(store, link["id"], cfg, now=NOW)["evidence"] if e["type"] == "behavioral_lcn_keyup")
+    assert ev["details"]["matches"] == 1 and ev["details"]["lcn"] == 7

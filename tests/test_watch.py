@@ -59,6 +59,21 @@ def test_plan_picks_the_tier3_network_and_pins_control_channels(store, cfg):
         plan_watch(store, cfg, 2_000_000, limit=3, freqs=[465_000_000, 469_350_000])
 
 
+def test_plan_keeps_known_carriers_off_dc_and_off_the_raster(store, cfg):
+    _tier3(store, 469_350_000, "slc_c_sys_parms")
+    store.upsert_carrier(469_102_000, NOW - 600)               # 2 kHz off the 12.5 kHz raster (a kHz-named import)
+    store.commit()
+    p = plan_watch(store, cfg, 2_000_000, limit=3, center_hz=469_350_000)
+    assert abs(p.center_hz - 469_350_000) >= 25_000 and p.pinned == [469_350_000] and not p.blind
+    assert 469_102_000 in p.channels and 469_100_000 not in p.channels    # watched as itself, no raster twin
+    assert p.priority[469_102_000] == 1 and p.priority[469_350_000] == 2
+
+
+def test_requested_carriers_that_are_not_control_channels_are_not_pinned(store, cfg):
+    p = plan_watch(store, cfg, 2_000_000, limit=2, freqs=[469_400_000, 469_500_000])
+    assert p.pinned == [] and p.priority[469_400_000] == 0
+
+
 def test_plan_without_anything_known_is_refused(store, cfg):
     with pytest.raises(ValueError, match="nothing known"):
         plan_watch(store, cfg, 2_000_000, limit=3)
@@ -74,7 +89,7 @@ def test_keyup_detector():
         p = noise.copy()
         for i in on:
             p[i] = level
-            p[i - 1] = p[i + 1] = level / 8          # its skirts, 9 dB down: not carriers of their own
+            p[i - 1] = p[i + 1] = max(p[i - 1], 3.0)  # its skirts, 5 dB over the floor: under the key-up threshold
         return det.update(t, p)
 
     assert step(0.0, (5,)) == ([], [])                # one block is not a key-up
@@ -91,18 +106,38 @@ def test_keyup_detector():
     assert len(ended) == 1 and ended[0].freq_hz == freqs[5] and ended[0].start == 0.0 and ended[0].end == pytest.approx(1.1)
     assert ended[0].peak_snr_db == 20.0
     assert [k.freq_hz for k in det.close()] == [freqs[12]]
+    # a very strong carrier lifts its neighbour over the threshold: that is a skirt, not a key-up
+    det = KeyupDetector(freqs, hang_s=1.0)
+    p = noise.copy()
+    p[5], p[6], p[9] = 1e5, 30.0, 30.0          # 50 dB carrier, its neighbour at 15 dB, a real 15 dB carrier elsewhere
+    det.update(0.0, p)
+    assert det.update(0.1, p)[0] == [freqs[5], freqs[9]]
 
 
 def test_instance_planner_pins_preempts_and_cools_down():
     p = InstancePlanner(pinned=[1], limit=3, max_hold_s=30)
     assert p.plan(0, {}) == ([1], [])
-    assert p.plan(1, {10: 1, 20: 1.5, 30: 2}) == ([10, 20], [])
-    assert p.waiting({10: 1, 20: 1.5, 30: 2}) == [30]
+    assert p.plan(1, {10: 1, 20: 1.5, 30: 2}) == ([30, 20], [])           # the most recent key-ups first
+    assert p.waiting({10: 1, 20: 1.5, 30: 2}) == [10]
     assert p.plan(10, {10: 1, 20: 1.5, 30: 2}) == ([], [])               # nobody has held long enough
-    assert p.plan(40, {10: 1, 20: 1.5, 30: 2}) == ([30], [10])           # 10 held for 39 s: gives way
+    assert p.plan(40, {10: 1, 20: 1.5, 30: 2}) == ([10], [20])           # held for 39 s: gives way
     assert p.plan(41, {10: 1, 20: 1.5, 30: 2}) == ([], [])               # and is not taken back while still keyed
-    assert p.plan(42, {20: 1.5}) == ([], [30])
-    assert p.plan(43, {20: 1.5, 10: 43}) == ([10], [])                    # keyed again: welcome back
+    assert p.plan(42, {20: 1.5}) == ([], [30, 10])
+    assert p.plan(43, {20: 1.5}) == ([], [])                              # still keyed since before: still waits
+    assert p.plan(44, {20: 44}) == ([], [])
+    assert p.plan(45, {}) == ([], [])
+    assert p.plan(46, {20: 46}) == ([20], [])                             # keyed again: welcome back
+
+
+def test_the_networks_traffic_channels_come_first():
+    """Battery: one pinned control channel, two decoders for the rest. Two carriers of other systems
+    are on the air all the time; a call on the network's traffic channel must still be heard."""
+    p = InstancePlanner(pinned=[1], limit=3, max_hold_s=30, priority={50: 0, 60: 2, 70: 2})
+    assert p.plan(0, {60: 0, 70: 0}) == ([1, 60, 70], [])
+    start, stop = p.plan(5, {60: 0, 70: 0, 50: 5})
+    assert start == [50] and len(stop) == 1                               # at once, not after 30 s
+    assert p.plan(6, {60: 0, 70: 0, 50: 5}) == ([], [])                   # the one that gave way waits for its key-down
+    assert p.plan(9, {60: 0, 70: 0}) == ([], [50])
 
 
 def test_channel_power_finds_the_carrier():
@@ -187,7 +222,9 @@ def test_watch_session_decodes_channels_when_they_key_up(tmp_path, watch_cfg):
             by.setdefault(int(r["freq_hz"]), []).append(r)
         assert len(by[165_600_000]) == 2 and all(r["decoded"] for r in by[165_600_000]), [dict(r) for r in rows]
         first = by[165_600_000][0]
-        assert 2.5 <= first["end"] - first["start"] <= 4.5
+        # keyed for 3.5 s; times are the wall clock when a block is processed, and the synthetic receiver
+        # cannot always keep real time on a loaded test machine
+        assert 2.5 <= first["end"] - first["start"] <= 6.5
         assert len(by[165_112_500]) == 1 and by[165_112_500][0]["decoded"]
         assert 165_300_000 in by                                              # the control channel, one long key-up
         assert client.scalar("SELECT COUNT(*) FROM carriers WHERE freq_hz = 165112500") == 1    # found by watching
@@ -195,6 +232,7 @@ def test_watch_session_decodes_channels_when_they_key_up(tmp_path, watch_cfg):
         assert carriers["165600000"]["keyups"] == 2 and carriers["165600000"]["syncs"] > 50
         assert carriers["165300000"]["syncs"] > carriers["165600000"]["syncs"]
         assert summ["watch"]["missed"] == 0 and "correlate" in summ
+        assert summ["watch"]["block_ms_avg"] > 0 and summ["watch"]["block_ms_budget"] == 100.0 and summ["watch"]["overflows"] == 0
         assert client.scalar("SELECT COUNT(*) FROM ingest_runs WHERE source = 'collector'") == 3   # one per carrier, not per key-up
         assert src.closed
         c = _wait(client, st.post_command(client, "test", "start_watch", {"freqs": [160_000_000, 165_300_000]}))

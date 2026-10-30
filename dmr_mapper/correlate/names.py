@@ -21,7 +21,7 @@ import time
 from typing import Any
 
 from ..db import Store
-from .context import format_site
+from .context import Context, format_site
 
 KINDS = ("system", "site")
 
@@ -37,7 +37,29 @@ def system_anchor(variant: str, net_id: int | None, model: str | None) -> str | 
 def site_anchor(system: str | None, variant: str, site_number: int | None) -> str | None:
     if system is None or site_number is None:
         return None
-    return f"{system}:{format_site(site_number) if variant == 'tier3' else site_number}"
+    return f"{system}:{format_site(site_number) if system.startswith('tier3') else site_number}"
+
+
+def system_anchor_for(ctx: Context, cids: list[int]) -> str | None:
+    """The anchor of a group of carriers: from what they announce (the Tier III network most of
+    the announcing carriers name, else the Connect Plus net), whatever the other carriers are."""
+    t3: dict[tuple[str | None, int], int] = {}
+    con: dict[int, int] = {}
+    for cid in cids:
+        c = ctx.carriers[cid]
+        ident = ctx.t3_identity(c)
+        if ident is not None and ident[1] is not None:
+            key = (ctx.t3_model(c), ident[1])
+            t3[key] = t3.get(key, 0) + 1
+        k = ctx.primary_con_site(c)
+        if k is not None:
+            con[k[0]] = con.get(k[0], 0) + 1
+    if t3:
+        model, net = max(t3, key=t3.get)
+        return system_anchor("tier3", net, model)
+    if con:
+        return system_anchor("conplus", max(con, key=con.get), None)
+    return None
 
 
 def _members(store: Store, kind: str) -> dict[int, dict[str, Any]]:
@@ -63,13 +85,14 @@ def apply_names(store: Store) -> int:
         for n in names:
             freqs = set(json.loads(n["carriers"] or "[]"))
             best: tuple[tuple[int, int], int] | None = None
+            anchored_here = n["anchor"] is not None and any(t["anchor"] == n["anchor"] for t in targets.values())
             for tid, t in targets.items():
                 if tid in taken:
                     continue
                 same_anchor = n["anchor"] is not None and t["anchor"] == n["anchor"]
                 overlap = len(freqs & t["carriers"])
-                if not same_anchor and (n["anchor"] is not None or overlap == 0):
-                    continue          # an anchored name only goes where its anchor is
+                if not same_anchor and (anchored_here or overlap == 0):
+                    continue          # where its anchor is, else (it is not on the air now) its carriers
                 score = (int(same_anchor), overlap)
                 if best is None or score > best[0]:
                     best = (score, tid)
@@ -110,6 +133,18 @@ def set_name(store: Store, kind: str, target: str, name: str | None, now: int | 
     tid = _resolve(store, kind, target)
     t = _members(store, kind)[tid]
     anchor, freqs = t["anchor"], sorted(t["carriers"])
+    if anchor is None and freqs:
+        # tables derived before anchors existed (migration 005): work it out from the carriers
+        ctx = Context(store, now, 30)
+        cids = [c.id for c in ctx.carriers.values() if c.freq_hz in t["carriers"]]
+        sys_anchor = system_anchor_for(ctx, cids)
+        if kind == "system":
+            anchor = sys_anchor
+        else:
+            number = store.scalar("SELECT site_number FROM sites WHERE id = ?", (tid,))
+            anchor = site_anchor(sys_anchor, "", number)
+    if anchor is None and not freqs and name:
+        raise ValueError(f"{kind} {tid} has neither an identity on air nor carriers: nothing a name could follow")
     # whatever name this system/site has now, by anchor or by carriers, is replaced
     for n in store.rows("SELECT id, anchor, carriers FROM names WHERE kind = ?", (kind,)):
         if (anchor is not None and n["anchor"] == anchor) or (n["anchor"] is None and set(json.loads(n["carriers"])) & set(freqs)):

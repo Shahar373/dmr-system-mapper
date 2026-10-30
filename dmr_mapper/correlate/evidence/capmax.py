@@ -5,9 +5,13 @@ bytes) say "talkgroup T is on LCN L, timeslot s" while a call is on. A watch ses
 traffic channel key up at that moment, and the DSD-FME it started on it prints the call to T.
 Lining the two up gives the traffic channel's LCN and ties it to the control channel's site:
 
-* a call to T on carrier F, same slot, overlapping the update: a full match;
-* only a key-up of F starting within ±3 s of the update: half a match, shared between every
-  carrier that keyed up in that window (another system's carrier in the slice may key up too).
+* a call to T on carrier F, same slot, during the assignment: a full match;
+* only a key-up of F starting within ±3 s of the assignment's first update: half a match, shared
+  between every carrier that keyed up in that window (another system's carrier in the slice may
+  key up too).
+
+Each assignment (one row: the updates for one TG/LCN/slot while they keep coming, see
+``writer.Aggregator._assignment``) counts at most once per carrier, however long the call.
 
 A group call goes out on every site with members, so a traffic channel whose own short LC names a
 different site than the control channel's is never matched with it. The LCN a carrier gets is the
@@ -18,6 +22,7 @@ short LC) make the link confirmed.
 
 from __future__ import annotations
 
+import bisect
 import json
 from collections import defaultdict
 
@@ -25,7 +30,7 @@ from ..context import Context
 from ..model import Evidence
 from ..scoring import ScoringConfig
 
-CALL_WINDOW_S = 5        # call rows and updates are both kept per minute: overlap generously
+CALL_WINDOW_S = 5        # call rows are kept per minute: overlap generously
 KEYUP_WINDOW_S = 3
 PER_MATCH = 0.4
 
@@ -44,9 +49,9 @@ def lcn_keyup(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
         p = json.loads(r["payload"])
         if p.get("group") and p.get("tgt"):
             calls[int(p["tgt"])].append((int(r["carrier_id"]), int(r["ts"]), int(r["last_ts"]), p.get("slot")))
-    keyups = [(int(r["carrier_id"]), float(r["start"]), float(r["end"]))
-              for r in ctx.store.rows("SELECT carrier_id, start, end FROM keyups WHERE end >= ?", (ctx.since,))]
-    keyups.sort(key=lambda k: k[1])
+    keyups = sorted((float(r["start"]), int(r["carrier_id"]))
+                    for r in ctx.store.rows("SELECT carrier_id, start FROM keyups WHERE end >= ?", (ctx.since,)))
+    starts = [k[0] for k in keyups]
 
     # votes[(control, carrier)][lcn] = weight; plus bookkeeping for details
     votes: dict[tuple[int, int], dict[int, float]] = defaultdict(lambda: defaultdict(float))
@@ -62,12 +67,13 @@ def lcn_keyup(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
         matched_by_call: set[int] = set()
         if p.get("mode") == "open":                        # Advantage mode carries short TG ids, not the call's
             for f_id, cts, clast, cslot in calls.get(tg, []):
-                if f_id == c_id or not _may_belong(ctx, cc, f_id):
+                if f_id == c_id or f_id in matched_by_call or not _may_belong(ctx, cc, f_id):
                     continue
                 if cts - CALL_WINDOW_S <= last and clast + CALL_WINDOW_S >= ts and (cslot is None or slot is None or int(cslot) == int(slot)):
                     matched_by_call.add(f_id)
-                    _vote(votes, info, c_id, f_id, lcn, 1.0, {"ts": cts, "tg": tg, "slot": slot, "lcn": lcn, "by": "call"})
-        near = {k[0] for k in keyups if abs(k[1] - ts) <= KEYUP_WINDOW_S and k[0] != c_id and _may_belong(ctx, cc, k[0])}
+                    _vote(votes, info, c_id, f_id, lcn, 1.0, {"ts": ts, "tg": tg, "slot": slot, "lcn": lcn, "by": "call"})
+        lo, hi = bisect.bisect_left(starts, ts - KEYUP_WINDOW_S), bisect.bisect_right(starts, ts + KEYUP_WINDOW_S)
+        near = {f_id for _, f_id in keyups[lo:hi] if f_id != c_id and _may_belong(ctx, cc, f_id)}
         near -= matched_by_call
         for f_id in near:
             _vote(votes, info, c_id, f_id, lcn, 0.5 / len(near), {"ts": ts, "tg": tg, "slot": slot, "lcn": lcn, "by": "key-up"})

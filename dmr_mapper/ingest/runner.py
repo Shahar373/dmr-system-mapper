@@ -23,6 +23,27 @@ def _tz(cfg: dict[str, Any]) -> ZoneInfo:
     return ZoneInfo(str(cfg.get("timezone") or "UTC"))
 
 
+def system_tz() -> Any:
+    """This machine's local time zone: the one DSD-FME stamps its lines in (``localtime()``). The
+    collector reads its own decoders' lines in it; log files are read in ``timezone`` from config,
+    which must then be the zone of the machine that captured them."""
+    import os
+
+    name = (os.environ.get("TZ") or "").lstrip(":")
+    if name:
+        try:
+            return ZoneInfo(name)
+        except Exception:  # noqa: BLE001
+            pass
+    try:
+        target = str(Path("/etc/localtime").resolve())
+        if "zoneinfo/" in target:
+            return ZoneInfo(target.split("zoneinfo/", 1)[1])
+    except Exception:  # noqa: BLE001
+        pass
+    return datetime.now().astimezone().tzinfo
+
+
 def _bucket_minutes(cfg: dict[str, Any]) -> int:
     return int(cfg.get("ingest", {}).get("bucket_minutes", 15))
 

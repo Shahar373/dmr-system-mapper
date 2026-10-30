@@ -38,8 +38,8 @@ def test_tier3_names_follow_the_network_identity(capmax_store, cfg, tmp_path):
     paths, _ = export_all(store, cfg, tmp_path / "exp", "weak")
     html = paths[0].read_text(encoding="utf-8")
     data_line = next(line for line in html.splitlines() if line.startswith("const DATA"))
-    assert "Hilltop <b> (site 1.3" in data_line                         # in the data, shown through esc()
-    assert "Hilltop <b>" not in html.replace(data_line, "") and "esc(v)" in html
+    assert "Hilltop \\u003cb> (site 1.3" in data_line                    # in the data without a "<", shown through esc()
+    assert "<b>" not in data_line and "Hilltop <b>" not in html and "esc(v)" in html
     # renaming replaces, --clear removes
     set_name(store, "system", str(_system_of(store, CC_A)["id"]), "North")
     assert [n["name"] for n in list_names(store) if n["kind"] == "system"] == ["North"]
@@ -73,3 +73,32 @@ def test_name_cli(capmax_store, cfg, tmp_path, capsys, monkeypatch):
     assert main(["--db", str(db), "name", "site", "999"]) == 2
     assert main(["--db", str(db), "name", "site", "999", "x"]) == 1
     assert "no site 999" in capsys.readouterr().err
+
+
+def test_anchor_comes_from_the_announcing_carriers_and_unnameable_is_refused(store, cfg):
+    import pytest
+
+    from test_watch import _tier3
+
+    cc = _tier3(store, 469_350_000, "slc_c_sys_parms")
+    others = []
+    for f in (469_062_500, 469_100_000, 469_137_500):        # heard keying up, never announced anything
+        cid = store.upsert_carrier(f, NOW - 600)
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+        others.append(f)
+    store.upsert_carrier_seen(cc, NOW - 600, NOW - 60)
+    store.commit()
+    for f in others:
+        propose(store, 469_350_000, f, "same_site", 0.9, "LCN learned", cfg, now=NOW)
+    run(store, cfg, now=NOW)
+    sysrow = _system_of(store, 469_062_500)
+    assert sysrow["variant"] == "tier3" and sysrow["anchor"] == "tier3:Large:2"
+    # tables derived before migration 005 had no anchors: naming works them out
+    store.conn.execute("UPDATE systems SET anchor = NULL")
+    assert set_name(store, "system", "469062500", "North")["anchor"] == "tier3:Large:2"
+    # an announced-only site with no identity to follow cannot keep a name
+    sid = store.conn.execute("INSERT INTO sites (system_id, site_number, label, directly_observed, first_seen, last_seen)"
+                             " VALUES (?, 3, 'site 3', 0, 0, 0)", (sysrow["id"],)).lastrowid
+    store.conn.execute("UPDATE sites SET anchor = NULL WHERE id = ?", (sid,))
+    with pytest.raises(ValueError, match="nothing a name could follow"):
+        set_name(store, "site", str(sid), "Hill")

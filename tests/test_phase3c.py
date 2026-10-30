@@ -167,8 +167,13 @@ def test_retention_deletes_old_identity_data_only(store, cfg):
     store.add_sighting(a, cid, old // 86400, 1, ["src"])
     store.add_sighting(b, cid, new // 86400, 1, ["src"])
     store.conn.execute("INSERT INTO positions (session_id, ts, lat, lon) VALUES (1, ?, 32, 34)", (old,))
+    for started, ex in ((old, "SLOT 1 TGT=9 SRC=7 Weird Call"), (new, "SLOT 1 TGT=9 SRC=8 Weird Call")):
+        run = store.start_ingest_run("collector", None, cid, started, None)
+        store.finish_ingest_run(run, started + 60, 1, 0, {"SLOT # TGT=# SRC=# Weird Call": (1, ex)})
     store.commit()
     out = prune(store, cfg, now=now)
+    examples = [r["example"] for r in store.rows("SELECT example FROM unrecognized_lines ORDER BY run_id")]
+    assert examples == ["SLOT # TGT=# SRC=# Weird Call", "SLOT 1 TGT=9 SRC=8 Weird Call"]   # old example reduced to its pattern
     assert out["identity_events"] == 1 and out["identity_sightings"] == 1 and out["identities"] == 1
     kinds = sorted(r["kind"] for r in store.rows("SELECT kind FROM csbk_events"))
     assert kinds == ["call", "tier3_sys_parms", "tier3_sys_parms"]          # networks are kept, old calls are not

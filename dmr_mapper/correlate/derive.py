@@ -22,7 +22,7 @@ import networkx as nx
 
 from ..db import Store
 from .context import CarrierInfo, Context, format_site
-from .names import apply_names, site_anchor, system_anchor
+from .names import apply_names, site_anchor, system_anchor_for
 from .scoring import ScoringConfig
 
 
@@ -76,8 +76,7 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
         variant, sys_code, net_id = _system_identity(ctx, carriers_in_sys)
         label = _system_label(ctx, carriers_in_sys, variant, sys_code, net_id)
         confidence = _component_confidence(links, carriers_in_sys)
-        models = {ctx.t3_model(ctx.carriers[c]) for c in carriers_in_sys} - {None} if variant == "tier3" else set()
-        sys_anchor = system_anchor(variant, net_id, "/".join(sorted(models)) or None)
+        sys_anchor = system_anchor_for(ctx, carriers_in_sys)
         cur = store.conn.execute(
             "INSERT INTO systems (label, variant, sys_code, net_id, confidence, created_by, created_at, updated_at, anchor)"
             " VALUES (?, ?, ?, ?, ?, 'auto', ?, ?, ?)",
@@ -129,7 +128,8 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
 
 def _system_identity(ctx: Context, cids: list[int]) -> tuple[str, str | None, int | None]:
     variants = defaultdict(int)
-    net_id = None
+    nets: dict[int, int] = defaultdict(int)
+    con_nets: dict[int, int] = defaultdict(int)
     codes: set[str] = set()
     for cid in cids:
         c = ctx.carriers[cid]
@@ -137,11 +137,19 @@ def _system_identity(ctx: Context, cids: list[int]) -> tuple[str, str | None, in
         ident = ctx.t3_identity(c)
         if ident is not None:
             codes.update(k[0] for k in c.t3_sites if k[0])
-            net_id = net_id if net_id is not None else ident[1]
+            if ident[1] is not None:
+                nets[ident[1]] += 1
         con = ctx.primary_con_site(c)
-        if con is not None and net_id is None:
-            net_id = con[0]
+        if con is not None:
+            con_nets[con[0]] += 1
     variant = max(variants, key=variants.get) if variants else "unknown"
+    # carriers linked by behaviour alone (a traffic channel heard keying up) may outnumber the ones
+    # that announce the system: what is announced on air names the variant
+    if variant in ("unknown", "tier2") and nets:
+        variant = "tier3"
+    elif variant in ("unknown", "tier2") and con_nets:
+        variant = "conplus"
+    net_id = max(nets, key=nets.get) if nets else (max(con_nets, key=con_nets.get) if con_nets else None)
     # the SYS code differs per site, so a multi-site network stores all of them
     sys_code = ",".join(sorted(codes)) if codes else None
     return variant, sys_code, net_id

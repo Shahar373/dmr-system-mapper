@@ -455,6 +455,15 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
     line(True, "python", f"{platform.python_version()} on {platform.machine()} {platform.system()}")
     line(True, "config", str(cfg.get("_source")))
+    from datetime import datetime as _dt
+    from zoneinfo import ZoneInfo
+
+    from .ingest.runner import system_tz
+    sys_tz, cfg_tz = system_tz(), ZoneInfo(str(cfg.get("timezone") or "UTC"))
+    same = _dt.now(sys_tz).utcoffset() == _dt.now(cfg_tz).utcoffset()
+    line(same or None, "time zone", f"system {sys_tz}, config {cfg_tz}" + ("" if same else
+         f": different. Live decoding is right either way; raw logs from here must be ingested with timezone: {sys_tz}"
+         f" (or set this machine's zone: sudo timedatectl set-timezone {cfg_tz})"))
     for mod, why in (("numpy", "collector"), ("scipy", "collector"), ("textual", "tui"), ("networkx", "correlator"), ("yaml", "config")):
         try:
             m = __import__(mod)

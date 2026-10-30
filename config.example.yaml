@@ -10,7 +10,9 @@ paths:
   exports: var/exports         # graph exports (HTML, GraphML, JSON, systems.txt)
   snapshots: var/snapshots     # nightly consistent copies of the database; the archive Pi pulls this folder
 
-timezone: Asia/Jerusalem       # display only; the database stores UTC epoch seconds
+timezone: Asia/Jerusalem       # display, and the clock of DSD-FME log files given to `mapper ingest` (the capturing
+                               # machine's zone). The collector reads its own decoders in the system zone; keep the
+                               # Pi's zone the same (`mapper doctor` checks). The database stores UTC epoch seconds.
 
 sdr:
   source: soapy                # soapy (real receiver) | file (replay an IQ recording, see replay below)

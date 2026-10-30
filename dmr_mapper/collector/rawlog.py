@@ -14,7 +14,6 @@ import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any
-from zoneinfo import ZoneInfo
 
 
 class RawLog:
@@ -25,7 +24,8 @@ class RawLog:
         self.freq_hz = freq_hz
         self.max_bytes = int(float(dcfg.get("raw_log_max_mb", 50)) * 1_000_000)
         self.total_cap = self.max_bytes * max(1, int(dcfg.get("raw_log_keep", 5)))
-        self.tz = ZoneInfo(str(cfg.get("timezone") or "UTC"))
+        from ..ingest.runner import system_tz
+        self.tz = system_tz()      # the zone of the lines in it (DSD-FME's local clock), so the name matches them
         self._fh = None
         self._path: Path | None = None
         self._size = 0

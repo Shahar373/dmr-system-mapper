@@ -501,6 +501,7 @@ class Daemon:
         decoders: dict[int, DecoderProcess] = {}
         ingests: dict[int, CarrierIngest] = {}
         result: dict[int, dict[str, Any]] = {}
+        stopping: list[threading.Thread] = []
         try:
             for i, t in enumerate(sl.targets):
                 servers[t.freq_hz] = PcmServer(base_port + i)
@@ -530,7 +531,7 @@ class Daemon:
                     for f, ing in ingests.items():
                         if f not in inverted and ing.pos_syncs == 0 and ing.neg_syncs > 20:
                             inverted.add(f)
-                            decoders[f].stop()
+                            stopping.append(decoders[f].stop_async())     # the new one takes over the bridge
                             decoders[f] = DecoderProcess(self.cfg, f, servers[f].port, lines, inverted=True)
                             decoders[f].start()
                             ing.stats.note = "restarted with -xr (inverted polarity)"
@@ -546,11 +547,13 @@ class Daemon:
                                                  for f, ing in ingests.items()])
                     last_progress = now
         finally:
-            for d in decoders.values():
-                d.stop()
-            self._drain(lines, ingests, final=True)
+            # bridges first (DSD-FME's read returns 0 and it exits by itself), then every process at once
             for srv in servers.values():
                 srv.close()
+            stopping += [d.stop_async() for d in decoders.values()]
+            for th in stopping:
+                th.join(timeout=10)
+            self._drain(lines, ingests, final=True)
             for f, ing in ingests.items():
                 stats = ing.finish()
                 r = ing.summary()
@@ -564,12 +567,18 @@ class Daemon:
     def _watch(self, store: Store, source: Any, params: dict[str, Any], budget_s: int, t0: float, summary: dict[str, Any],
                sid: int) -> None:
         """One slice for the whole session: pinned control channel(s), a DSD-FME for every channel
-        that keys up (see watch.py), every key-up recorded."""
+        that keys up (see watch.py), every key-up recorded.
+
+        Nothing slow happens in the block loop: a decoder is retired (bridge closed, process
+        stopped) in a thread of its own, and its port only comes back when that is done. A carrier
+        is created when its DSD-FME prints a DMR sync or its key-up lasts ``min_keyup_s``, not by a
+        blip. Key-up times are the wall clock when the block is processed: DSD-FME stamps its lines
+        when it processes the same audio, so both carry the same lag behind the air, whatever the
+        receiver buffers or drops. Overflows and the time a block takes are reported."""
         from collections import deque
 
         from ..ingest.runner import _band_for
 
-        dcfg = self.cfg.get("decode", {}) or {}
         w = watch_cfg(self.cfg)
         limit = int(params.get("max_instances") or 1)
         plan = plan_watch(store, self.cfg, source.sample_rate, limit, center_hz=params.get("center_hz"), freqs=params.get("freqs"))
@@ -580,37 +589,43 @@ class Daemon:
         block_s = chan.hop / source.sample_rate
         history: "deque[tuple[np.ndarray, int]]" = deque(maxlen=max(1, int(round(float(w["preroll_s"]) / block_s)) + 1))
         detector = KeyupDetector(plan.channels, float(w["keyup_snr_db"]), float(w["keydown_snr_db"]), float(w["hang_s"]))
-        planner = InstancePlanner(plan.pinned, limit, float(w["max_hold_s"]))
-        base_port = int(dcfg.get("tcp_base_port", 7355))
-        # twice as many ports as decoders, used in turn: a port is not reused while the DSD-FME
-        # that was just stopped on it may still be closing
+        planner = InstancePlanner(plan.pinned, limit, float(w["max_hold_s"]), plan.priority)
+        base_port = int((self.cfg.get("decode", {}) or {}).get("tcp_base_port", 7355))
+        # twice as many ports as decoders, used in turn, each back only once its old DSD-FME is gone
         free_ports = deque(base_port + i for i in range(2 * limit))
         lines: "queue.Queue[tuple[int, str | None]]" = queue.Queue()
         servers: dict[int, PcmServer] = {}
         decoders: dict[int, DecoderProcess] = {}
         ingests: dict[int, CarrierIngest] = {}
-        stopping: list[threading.Thread] = []
+        unheard: dict[int, list[str]] = {}         # lines of a channel whose DSD-FME has not printed a DMR sync yet
+        retiring: list[threading.Thread] = []
         decoded_now: set[int] = set()            # channels whose current key-up had a decoder at some point
+        restarts: dict[int, int] = {}
         per: dict[str, dict[str, Any]] = {}
         totals = {"keyups": 0, "decoded": 0, "missed": 0, "blips": 0, "preempted": 0}
+        timing = {"blocks": 0, "busy_s": 0.0, "max_ms": 0.0}
+        overflows0 = int(getattr(source, "overflows", 0) or 0)
         backlog = int(AUDIO_RATE * 2 * (float(w["preroll_s"]) + 3.0))   # pre-roll + DSD-FME start-up, int16
 
-        def stop_decoder(f: int) -> None:
-            d = decoders.pop(f, None)
-            if d is not None:
-                stopping.append(d.stop_async())
-            srv = servers.pop(f, None)
-            if srv is not None:
-                free_ports.append(srv.port)
-                srv.close()
+        def retire(f: int) -> None:
+            d, srv = decoders.pop(f, None), servers.pop(f, None)
             chan.remove_channel(f)
+
+            def run() -> None:
+                if srv is not None:
+                    srv.close()          # DSD-FME's read returns 0: it exits by itself
+                if d is not None:
+                    d.stop()
+                if srv is not None:
+                    free_ports.append(srv.port)
+            th = threading.Thread(target=run, name=f"retire-{f}", daemon=True)
+            th.start()
+            retiring.append(th)
 
         def start_decoder(f: int) -> None:
             port = free_ports.popleft()
             srv = PcmServer(port, backlog_bytes=backlog)
             servers[f] = srv
-            if f not in ingests:
-                ingests[f] = CarrierIngest(store, self.cfg, f)
             decoders[f] = DecoderProcess(self.cfg, f, port, lines)
             decoders[f].start()
             chan.add_channel(f)
@@ -618,6 +633,27 @@ class Daemon:
                 pcm = chan.extract(Xh, n0h, only=[f]).get(f)
                 if pcm is not None:
                     srv.write(pcm)
+
+        def drain() -> None:
+            while True:
+                try:
+                    f, line = lines.get_nowait()
+                except queue.Empty:
+                    return
+                if line is None:
+                    continue
+                ing = ingests.get(f)
+                if ing is None:
+                    buf = unheard.setdefault(f, [])
+                    buf.append(line)
+                    if "Sync:" in line and "DMR" in line:
+                        ingests[f] = ing = CarrierIngest(store, self.cfg, f)
+                        for held in unheard.pop(f):
+                            ing.feed(held)
+                    elif len(buf) > 400:
+                        del buf[:200]
+                    continue
+                ing.feed(line)
 
         def record_keyup(k: Any, decoded: bool) -> None:
             if k.duration < float(w["min_keyup_s"]) and k.freq_hz not in plan.pinned:
@@ -634,16 +670,20 @@ class Daemon:
             totals["keyups"] += 1
             totals["decoded" if decoded else "missed"] += 1
 
-        wall0 = time.time()
-        samples = 0
-        last_flush = last_progress = time.monotonic()
+        def load() -> dict[str, Any]:
+            n = max(1, timing["blocks"])
+            return {"overflows": int(getattr(source, "overflows", 0) or 0) - overflows0,
+                    "block_ms_avg": round(1000 * timing["busy_s"] / n, 1), "block_ms_max": round(timing["max_ms"], 1),
+                    "block_ms_budget": round(1000 * block_s, 1)}
+
+        last_flush = last_progress = last_check = time.monotonic()
         try:
             source.read(int(source.sample_rate * 0.1))   # settle after retune
             while True:
                 self._check(t0, budget_s)
                 block = source.read(chan.hop)
-                samples += len(block)
-                t = wall0 + samples / source.sample_rate     # source time: what the receiver heard when
+                t = time.time()
+                busy0 = time.monotonic()
                 X, n0 = chan.transform(block)
                 history.append((X, n0))
                 started, ended = detector.update(t, chan.channel_power(X, plan.channels, float(w["channel_width_hz"])))
@@ -653,18 +693,30 @@ class Daemon:
                 to_start, to_stop = planner.plan(t, detector.active())
                 totals["preempted"] += sum(1 for f in to_stop if f in detector.active())
                 for f in to_stop:
-                    stop_decoder(f)
+                    retire(f)
                 for f in to_start:
                     start_decoder(f)
                     decoded_now.add(f)
                 fresh = set(to_start)
-                audio = chan.extract(X, n0, only=[f for f in servers if f not in fresh])
-                for f, pcm in audio.items():
+                for f, pcm in chan.extract(X, n0, only=[f for f in servers if f not in fresh]).items():
                     servers[f].write(pcm)
-                self._drain(lines, ingests)
+                drain()
                 if store.conn.in_transaction:
                     store.commit()
                 now = time.monotonic()
+                timing["blocks"] += 1
+                timing["busy_s"] += now - busy0
+                timing["max_ms"] = max(timing["max_ms"], 1000 * (now - busy0))
+                if now - last_check >= 2:
+                    # a pinned control channel's DSD-FME must not stay dead for the rest of a long session
+                    for f in plan.pinned:
+                        d = decoders.get(f)
+                        if d is not None and not d.alive and restarts.get(f, 0) < 3:
+                            restarts[f] = restarts.get(f, 0) + 1
+                            decoders[f] = DecoderProcess(self.cfg, f, servers[f].port, lines)
+                            decoders[f].start()
+                    retiring[:] = [th for th in retiring if th.is_alive()]
+                    last_check = now
                 if now - last_flush >= 60:
                     for ing in ingests.values():
                         ing.flush_partial()
@@ -679,27 +731,27 @@ class Daemon:
                              for f in sorted(set(active) | set(plan.pinned))]
                     self._set_progress(phase="watching", center_hz=plan.center_hz, span_hz=plan.to_dict()["span_hz"], channels=chans,
                                        instances=f"{len(servers)}/{limit}", elapsed_s=int(now - t0), budget_s=budget_s,
-                                       **totals, **self._gps_progress())
+                                       **totals, **load(), **self._gps_progress())
                     last_progress = now
         finally:
-            for k in detector.close():
-                record_keyup(k, k.freq_hz in decoded_now or k.freq_hz in servers)
-            for f in list(decoders):
-                d = decoders.pop(f)
-                d.stop()
-            for th in stopping:
-                th.join(timeout=5)
-            self._drain(lines, ingests, final=True)
-            for srv in servers.values():
-                srv.close()
-            for f, ing in ingests.items():
-                ing.finish()
-                r = ing.summary()
-                per.setdefault(str(f), {"keyups": 0, "airtime_s": 0.0, "decoded": 0}).update(
-                    {k: r[k] for k in ("lines", "syncs", "structural", "variant", "identities")})
-            store.commit()
-            summary["watch"] = totals
-            summary["carriers"] = per
+            # processes and ports first, whatever happens to the writes below
+            for f in list(servers):
+                retire(f)
+            for th in retiring:
+                th.join(timeout=10)
+            drain()
+            try:
+                for k in detector.close():
+                    record_keyup(k, k.freq_hz in decoded_now)
+                for f, ing in ingests.items():
+                    ing.finish()
+                    r = ing.summary()
+                    per.setdefault(str(f), {"keyups": 0, "airtime_s": 0.0, "decoded": 0}).update(
+                        {k: r[k] for k in ("lines", "syncs", "structural", "variant", "identities")})
+                store.commit()
+            finally:
+                summary["watch"] = {**totals, **load(), "restarts": restarts, "no_dmr": sorted(unheard)}
+                summary["carriers"] = per
 
     @staticmethod
     def _drain(lines: "queue.Queue[tuple[int, str | None]]", ingests: dict[int, CarrierIngest], final: bool = False) -> None:

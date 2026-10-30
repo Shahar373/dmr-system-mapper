@@ -110,7 +110,7 @@ def test_tier3_system_sites_and_neighbors(synth_store):
     assert det["details"]["bidirectional"] is True
     sysrow = next(dict(r) for r in synth_store.rows("SELECT * FROM systems WHERE sys_code = '1A2B'"))
     sites = [dict(r) for r in synth_store.rows("SELECT * FROM sites WHERE system_id = ?", (sysrow["id"],))]
-    assert {s["site_number"] for s in sites} == {7, 8}
+    assert {s["site_number"] for s in sites} == {108, 109}          # raw sites 7 and 8, shown as 1.8 and 1.9
     assert all(s["directly_observed"] for s in sites)
 
 

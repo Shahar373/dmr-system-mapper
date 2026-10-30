@@ -121,7 +121,9 @@ T3_RX_RE = re.compile(r"RX Base: (?P<base>\d+); RX Step: (?P<step>\d+); RX Freq:
 T3_TX_RE = re.compile(r"TX Base: (?P<base>\d+); TX Step: (?P<step>\d+); TX Freq: (?P<freq>\d+);")
 T3_SYSCODE_RE = re.compile(r"\bSYS: (?P<sys>[0-9A-Fa-f]{4});")
 T3_ADJ_ID_RE = re.compile(r"^(?P<model>\w+); Net ID: (?P<net>\d+); Site ID: (?P<site>\d+)(?:\.(?P<sub>\d+))?;")
-T3_ALOHA_MISC_RE = re.compile(r"Reg Window: |Aloha Mask: |Timers - |C_AHOY|Channel Timing CSBK|Reg: \d+; Backoff:")
+T3_ALOHA_MISC_RE = re.compile(r"Reg Window: |Aloha Mask: |Timers - |C_AHOY|Channel Timing CSBK|Reg: \d+; Backoff:|\bVer: \d+;.*\bSF: \d+;|^MBC Op: ")
+# with -Z, after a C_BCAST: the broadcasting site's own system code and the raw parameter fields
+T3_BCAST_DEBUG_RE = re.compile(r"^SYS: (?P<sys>[0-9A-Fa-f]{4}); Reg: \d+; Backoff: ")
 
 # Hytera XPT
 XPT_STATUS_RE = re.compile(r"Hytera XPT Site Status - Free LCN: (?P<free>\d+) SN: (?P<sn>\d+)")
@@ -198,7 +200,8 @@ class LineParser:
         self._slco: Structural | None = None        # decoded short LC waiting for its Completed Block line
         self._tier3_lines = 0                       # Tier III system parameters seen in this stream
         self._capplus_lines = 0                     # Cap+ channel status CSBKs seen in this stream
-        self._raw_numbering = False                 # DSD-FME switched to raw Net/Site numbers (see _t3_ids)
+        self._burst_crc_err = False                 # DSD-FME flagged the last burst (CRC ERR)
+        self._ras = False                           # ... or marked it {RAS ...}: its CRC carries a MAC
         self.lines = 0
         self.parsed = 0
         self.unrecognized = 0
@@ -308,6 +311,8 @@ class LineParser:
         handled = yield from self._payload(stripped)
         if not stripped.startswith(_SLC_PREFIXES):
             self._lines_since_burst += 1     # short LCs come from the CACH, not from the burst itself
+        if "{RAS" in stripped:
+            self._ras = True
         if handled:
             self.parsed += 1
         else:
@@ -353,6 +358,8 @@ class LineParser:
             self._cc = cc
         self._burst_kind = kind
         self._lines_since_burst = 0
+        self._burst_crc_err = crc
+        self._ras = "{RAS" in tail
         yield Burst(self._ts, m.group("pol"), slot, cc, kind, crc, tail.strip()[:120])
 
     # -- payload lines ----------------------------------------------------------------------------
@@ -509,8 +516,6 @@ class LineParser:
         # --- Tier III ----------------------------------------------------------------------------
         if m := T3_SYS_RE.search(s):
             self._tier3_lines += 1
-            if "Capacity Max" in s:
-                self._raw_numbering = True      # this very line is already printed raw
             net, site, sub = self._t3_ids(int(m.group("net")), int(m.group("site")), int(m.group("sub")) if m.group("sub") else None)
             payload = {
                 "source": m.group("src").lower(), "model": m.group("model"), "net_id": net,
@@ -630,12 +635,14 @@ class LineParser:
         return False
 
     # -- Tier III numbering ---------------------------------------------------------------------------
-    def _t3_ids(self, net: int, site: int, sub: int | None) -> tuple[int, int, int | None]:
-        """DSD-FME prints Tier III identities as ``Net ID: net+1; Site ID: 1.site+1`` (``-D 0``,
-        see rawpdu.printed_ids), but once it has decoded one Motorola (FID 0x10) Aloha or broadcast
-        it switches the whole process to raw ``Net ID: net; Site ID: site``. Raw prints after that
-        point are converted back, so one site keeps one number."""
-        if sub is None and self._raw_numbering:
+    @staticmethod
+    def _t3_ids(net: int, site: int, sub: int | None) -> tuple[int, int, int | None]:
+        """DSD-FME prints Tier III identities as ``Net ID: net+1; Site ID: 1.site+1`` (``-D 0``, and
+        any other DMRLA value: see rawpdu.printed_ids), but once it has decoded one Motorola (FID
+        0x10) Aloha or broadcast it switches the whole process to raw ``Net ID: net; Site ID: site``.
+        Only the raw print has no sub-site, so that alone tells them apart, whatever the parser saw
+        before (a log resumed half-way, a capture without -Z)."""
+        if sub is None:
             return printed_ids(net, site)
         return net, site, sub
 
@@ -665,14 +672,17 @@ class LineParser:
         if self._burst_kind != "CSBK" or len(b) != 12:
             return
         if not csbk_crc_ok(b):
-            yield Quality(self._ts, "pdu_crc_err")
-            return
+            if not (self._ras and not self._burst_crc_err):
+                yield Quality(self._ts, "pdu_crc_err")
+                return
+            # a RAS system: the CRC carries a MAC, so DSD-FME decodes on its FEC alone, and so do we
+            yield Quality(self._ts, "pdu_ras")
         d = decode_csbk(b)
         key = f"FID {d['fid']:02X} opcode {d['opcode']:02X}"
         p = self._pending
-        if d.get("kind") in ("aloha", "adjacent_site") or (d["opcode"] == 40 and d.get("a_type") == 2):
-            if d["fid"] == 0x10:
-                self._raw_numbering = True      # what DSD-FME prints from now on is raw
+        if d.get("kind") in ("aloha", "adjacent_site", "vote_now"):
+            if d.get("kind") == "vote_now" and p is not None and p.kind == "tier3_bcast" and p.payload.get("a_type") == "vote_now":
+                self._set_ids(p.payload, d["neighbor"], "adj_")
             if d.get("kind") == "aloha" and p is not None and p.kind == "tier3_sys_parms" and p.payload.get("source") == "c_aloha_sys_parms":
                 self._set_ids(p.payload, d["own"])
             if d.get("kind") == "adjacent_site" and p is not None and p.kind == "tier3_bcast" and p.payload.get("a_type") == "adjacent_site":
@@ -695,6 +705,12 @@ class LineParser:
 
     # -- Tier III broadcast continuation ------------------------------------------------------------
     def _t3_detail(self, p: Structural, s: str) -> bool:
+        if m := T3_BCAST_DEBUG_RE.match(s):
+            # the broadcasting site's own code: for a neighbour announcement not the code it is about
+            p.payload["own_sys_code"] = m.group("sys").upper()
+            if p.payload.get("a_type") not in ("adjacent_site", "vote_now"):
+                p.payload.setdefault("sys_code", p.payload["own_sys_code"])
+            return True
         hit = False
         if m := T3_ONLINE_RE.search(s):
             p.payload["online"] = m.group("state") == "Online"

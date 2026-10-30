@@ -9,13 +9,13 @@ from typing import Any
 
 from ..db import Store
 from ..ingest.dsdfme import LineParser, ParseContext
-from ..ingest.runner import _band_for, _bucket_minutes, _tz
+from ..ingest.runner import _band_for, _bucket_minutes, system_tz
 from ..ingest.writer import Aggregator, IngestStats
 
 
 class CarrierIngest:
     def __init__(self, store: Store, cfg: dict[str, Any], freq_hz: int, snr_db: float | None = None, source: str = "collector"):
-        tz = _tz(cfg)
+        tz = system_tz()          # the clock DSD-FME prints on this machine, whatever config.timezone says
         self.store = store
         self.freq_hz = freq_hz
         now = int(time.time())

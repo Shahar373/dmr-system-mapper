@@ -240,7 +240,15 @@ def capmax_site(out_dir: Path, net: int, site: int, cc: int, control_freq: int, 
             # DSD-FME decodes this Motorola broadcast with raw numbering, and switches to it for good
             cc_lines.append(f" Large; Net ID: {net}; Site ID: {n_site}; SYS: {n_code:04X}; Active Connection Information Not Available;\n")
             if payload_lines:
+                cc_lines.append(f"  SYS: {code:04X}; Reg: 1; Backoff: 4; BParms1: {n_code << 0:04X}; BParms2: {n_lcn:06X};\n")
                 cc_lines.append(csbk_pdu(40, 0x10, [(16, 5, 6), (21, 14, n_code), (40, 14, code), (68, 12, n_lcn)]))
+            raw = True
+        elif off % 15 == 11:
+            shown = f"Net ID: {net}; Site ID: {site};" if raw else f"Net ID: {net + 1}; Site ID: 1.{site + 1}; Cat: Res;"
+            cc_lines.append(f" C_ALOHA_SYS_PARMS: Large; {shown} SYS: {code:04X}; Capacity Max\n")
+            if payload_lines:
+                cc_lines.append(" Ver: 0; Active Connection; SF: 1; NR: 3; Backoff: 4;\n")
+                cc_lines.append(csbk_pdu(25, 0x10, [(19, 3, 0), (23, 1, 1), (29, 2, 1), (40, 14, code)]))
             raw = True
         elif off % 20 == 7:
             cc_lines.append(" SLCO Capacity Plus Site: 0 - Rest LSN: 0 - RS: 00\n")

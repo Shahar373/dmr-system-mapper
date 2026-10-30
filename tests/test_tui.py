@@ -83,15 +83,16 @@ async def test_console_watch_status_and_naming(populated, cfg):
         await pilot.press("w")
         await pilot.press("n")                      # nothing selected yet: only a hint in the log
         tree = app.query_one("#systems")
-        node = next(n for n in tree.root.children if n.data == ("system", sys_id))
+        node = next(n for n in tree.root.children if n.data[:2] == ("system", sys_id))
         tree.move_cursor(node)
         await pilot.pause()
-        assert app._selected == ("system", sys_id)
+        assert app._selected[:2] == ("system", sys_id) and app._selected[2] == 168_863_000
         await pilot.press("n")
         assert app.focused is app.query_one("#name")
-        await pilot.press(*"Base", "enter")
+        await pilot.press(*"Base [/x] [red]", "enter")     # brackets in a name are text, not console markup
         await pilot.pause()
-        assert str(tree.root.children[0].label).startswith("Base (")
+        await pilot.pause()
+        assert str(tree.root.children[0].label).startswith("Base [/x] [red] (")
     with Store(populated) as s:
         assert [c["kind"] for c in st.recent_commands(s)][:1] == ["start_watch"]
-        assert s.scalar("SELECT name FROM systems WHERE id = ?", (sys_id,)) == "Base"
+        assert s.scalar("SELECT name FROM systems WHERE id = ?", (sys_id,)) == "Base [/x] [red]"

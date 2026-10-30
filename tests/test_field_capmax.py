@@ -107,3 +107,37 @@ def test_tier2_repeaters_sharing_slco_payloads_get_weak_capped_evidence(store, c
     ev = next(e for e in explain(store, ab["id"], cfg, now=NOW)["evidence"] if e["type"] == "identity_slco")
     assert ev["details"]["shared"] == 2 and ev["raw"] == round(2 / 3, 4) and ev["weight"] == 0.2
     assert not any(166_000_000 in (r["fa"], r["fb"]) for r in rows)    # different colour code
+
+
+def test_activity_updates_of_talkgroups_already_shared_are_not_counted_twice(store, cfg):
+    from dmr_mapper.ingest.rawpdu import address_hash
+
+    a = store.upsert_carrier(164_325_000, NOW - 600)
+    b = store.upsert_carrier(165_625_000, NOW - 600)
+    tg = store.upsert_identity("tg", 2102, NOW - 300)
+    for cid in (a, b):
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+        store.conn.execute("UPDATE carriers SET variant = 'tier2', variant_confidence = 0.6, dominant_cc = 6 WHERE id = ?", (cid,))
+        store.add_sighting(tg, cid, (NOW - 300) // 86400, 5, ["tgt"])
+        payload = {"ts1": "Group Voice", "hash1": address_hash(2102), "ts2": "Idle", "hash2": 0}
+        for _ in range(5):
+            store.add_csbk_event(cid, NOW - 120, 1, 6, "activity_update", payload, "x")
+    store.commit()
+    run(store, cfg, now=NOW)
+    types = {r["type"] for r in store.rows("SELECT type FROM evidence")}
+    assert "identity_talkgroup" in types and "identity_slco" not in types
+
+
+def test_old_rows_with_both_the_line_and_its_block_count_once(store, cfg):
+    a = store.upsert_carrier(164_325_000, NOW - 600)
+    b = store.upsert_carrier(165_625_000, NOW - 600)
+    for cid, n in ((a, 2), (b, 3)):
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+        store.conn.execute("UPDATE carriers SET variant = 'tier2', variant_confidence = 0.6, dominant_cc = 6 WHERE id = ?", (cid,))
+        for _ in range(n):      # an old database: the decoded line and its Completed Block, each stored
+            store.add_csbk_event(cid, NOW - 120, 1, 6, "activity_update", {"ts1": "Group Voice", "hash1": 7, "ts2": "Idle", "hash2": 0}, "x")
+            store.add_csbk_event(cid, NOW - 120, 1, 6, "slco_other", {"text": "SLCO Completed Block [18][00][70][07][60]"}, "y")
+    store.commit()
+    run(store, cfg, now=NOW)
+    # carrier a repeated it twice, not four times: under the 3 repeats an SLCO needs
+    assert store.scalar("SELECT COUNT(*) FROM evidence WHERE type = 'identity_slco'") == 0

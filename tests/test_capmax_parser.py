@@ -5,6 +5,7 @@ Motorola messages from SDRTrunk. Not yet checked against a real capture (unteste
 
 from __future__ import annotations
 
+import json
 from datetime import datetime
 
 from dmr_mapper.ingest import ParseContext, ingest_log_file, parse_lines
@@ -154,6 +155,9 @@ def test_synthetic_capmax_site_ingests_cleanly(tmp_path, store, cfg):
     cc = stats[0]
     assert cc.variant == "tier3" and cc.csbk_opcodes["FID 10 opcode 21"] == 8
     # one row per day for the control channel's own announcement, whatever its slot counter says
-    assert cc.stored_events["tier3_sys_parms"] == 1 and cc.structural["tier3_sys_parms"] == 120
+    # one row per day and source (short LC, Aloha) for the control channel's own announcement, whatever its slot counter says
+    assert cc.stored_events["tier3_sys_parms"] == 2 and cc.structural["tier3_sys_parms"] > 120
+    rows = store.rows("SELECT payload FROM csbk_events WHERE kind = 'tier3_sys_parms' AND carrier_id = 1")
+    assert {(json.loads(r["payload"])["net_id"], json.loads(r["payload"])["sub_site"]) for r in rows} == {(2, 2)}   # one numbering
     assert {"capmax_channel_update", "capmax_slco"} <= set(cc.untested_kinds)
     assert keyups == [(469_062_500, keyups[0][1], keyups[0][1] + 8)]

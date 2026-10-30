@@ -107,6 +107,10 @@ class PcmServer:
                 self._client.close()
                 self._client = None
         try:
+            self._srv.shutdown(socket.SHUT_RDWR)     # wakes the accept() at once (close alone waits for its timeout)
+        except OSError:
+            pass
+        try:
             self._srv.close()
         except OSError:
             pass

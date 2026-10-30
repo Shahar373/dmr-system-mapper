@@ -22,9 +22,10 @@ _DEDUP_WINDOW: dict[str, int | None] = {
     "activity_update": 3600, "protected_lc": 3600,
     "moto_data_channel": 86400, "slco_other": 86400, "unknown_csbk": 86400, "capmax_slco": 86400,
     "capmax_activity": 3600,
-    # per minute, like calls: the correlator matches them with key-ups and calls on other carriers
-    "call": 60, "capmax_channel_update": 60,
+    "call": 60,
+    # capmax_channel_update: one row per assignment (see Aggregator._assignment), not per window
 }
+ASSIGNMENT_GAP_S = 15    # Capacity Max channel updates for one TG/LCN/slot this close together are one assignment
 
 
 def pattern_of(text: str) -> str:
@@ -99,6 +100,7 @@ class Aggregator:
         self._status_ts: int | None = None          # ts at which the current status signature started
         self._last_status_seen_ts: int | None = None  # ts of the most recent Channel Status CSBK
         self._distinct_values: dict[str, set[int]] = defaultdict(set)
+        self._assignments: dict[tuple, list] = {}     # (lcn, slot, tg, mode) → [dedup key, last ts]
 
     # -- helpers ---------------------------------------------------------------------------
     def _bucket(self, ts: int) -> dict[str, Any]:
@@ -232,6 +234,8 @@ class Aggregator:
                     self._status_key = sig
                     self._status_ts = ev.ts
                 key = f"{sig}@{self._status_ts}"
+        elif ev.kind == "capmax_channel_update":
+            key = self._assignment(ev)
         elif ev.kind == "capplus_site":
             self._last_site = ev.payload["site"]
             self._rest(ev.ts, ev.payload["rest_lsn"], from_slco=True)
@@ -242,6 +246,18 @@ class Aggregator:
         new = self.store.add_csbk_event(self.carrier_id, ev.ts, ev.slot, ev.cc, ev.kind, ev.payload, key)
         if new:
             st.stored_events[ev.kind] += 1
+
+    def _assignment(self, ev: Structural) -> str:
+        """One row per assignment of a talkgroup to an LCN and slot: its ``ts`` is when the control
+        channel first announced it, ``last_ts`` the last update. The correlator lines up the start
+        with key-ups; a row per time window would make every window edge look like a new call."""
+        p = ev.payload
+        k = (p.get("lcn"), p.get("slot"), p.get("tg"), p.get("mode"))
+        open_ = self._assignments.get(k)
+        if open_ is None or ev.ts - open_[1] > ASSIGNMENT_GAP_S:
+            open_ = self._assignments[k] = [f"{ev.ts}|{canonical_json(dict(p))}", ev.ts]
+        open_[1] = ev.ts
+        return open_[0]
 
     def _rest(self, ts: int, rest_lsn: int, from_slco: bool = False) -> None:
         if rest_lsn == self._last_rest:

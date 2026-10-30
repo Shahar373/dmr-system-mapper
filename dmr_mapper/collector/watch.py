@@ -58,15 +58,18 @@ def watch_instances(ps: PowerState, cfg: dict[str, Any]) -> int:
 @dataclass
 class WatchPlan:
     center_hz: int
-    channels: list[int]                 # raster channels watched for key-ups
+    channels: list[int]                 # channels watched for key-ups: the raster, with known carriers at their own frequency
     pinned: list[int]                   # control channels decoded the whole session
     reason: str
     raster_hz: int = 12_500
     system: str | None = None           # e.g. "tier3 Large net 2"
+    priority: dict[int, int] = field(default_factory=dict)   # 0 the network's traffic channels, 1 unknown, 2 other systems
+    blind: list[int] = field(default_factory=list)          # known carriers on the receiver's DC point: not watched
 
     def to_dict(self) -> dict[str, Any]:
         return {"center_hz": self.center_hz, "span_hz": [self.channels[0], self.channels[-1]] if self.channels else [],
-                "channels": len(self.channels), "pinned": self.pinned, "reason": self.reason, "system": self.system}
+                "channels": len(self.channels), "pinned": self.pinned, "reason": self.reason, "system": self.system,
+                "network_carriers": sorted(f for f, p in self.priority.items() if p == 0), "blind": self.blind}
 
 
 def _raster_for(cfg: dict[str, Any], freq: int) -> int:
@@ -115,7 +118,10 @@ def plan_watch(store: Store, cfg: dict[str, Any], sample_rate: float, limit: int
     now = int(now or time.time())
     t3 = tier3_carriers(store, now - 30 * 86400)
     controls = {f: d for f, d in t3.items() if d["is_control"]}
+    known = {int(r["freq_hz"]): str(r["variant"]) for r in store.rows("SELECT freq_hz, variant FROM carriers WHERE last_seen >= ?",
+                                                                         (now - 30 * 86400,))}
     system = None
+    net = None
     if freqs:
         freqs = sorted(int(f) for f in freqs)
         if freqs[-1] - freqs[0] > usable - 2 * DC_GUARD_HZ:
@@ -123,44 +129,64 @@ def plan_watch(store: Store, cfg: dict[str, Any], sample_rate: float, limit: int
         center = (freqs[0] + freqs[-1]) // 2
         wanted = freqs
         reason = "requested carriers"
-        pin_from = [f for f in freqs if f in controls] or freqs
+        nets = [controls[f]["net"] for f in freqs if f in controls]
+        net = max(set(nets), key=nets.count) if nets else None
     elif center_hz:
         center = int(center_hz)
         wanted = []
         reason = "requested centre"
-        pin_from = [f for f in controls if abs(f - center) <= usable / 2 - DC_GUARD_HZ]
+        nets = [d["net"] for f, d in controls.items() if abs(f - center) <= usable / 2]
+        net = max(set(nets), key=nets.count) if nets else None
     else:
         # the Tier III network with the most carriers that fit in one slice; control channels count double
         best: tuple[float, list[int], Any] = (0.0, [], None)
-        nets = {d["net"] for d in t3.values()}
-        for net in nets:
-            pts = [(f, 2.0 if d["is_control"] else 1.0) for f, d in t3.items() if d["net"] == net]
+        for candidate in {d["net"] for d in t3.values()}:
+            pts = [(f, 2.0 if d["is_control"] else 1.0) for f, d in t3.items() if d["net"] == candidate]
             weight, inside = _best_window(pts, usable - 2 * DC_GUARD_HZ)
             if weight > best[0]:
-                best = (weight, inside, net)
+                best = (weight, inside, candidate)
         if best[1]:
-            wanted = best[1]
+            wanted, net = best[1], best[2]
             reason = "Tier III network with the most carriers in one slice"
-            model, net = best[2]
-            system = f"tier3 {model} net {net}"
         else:
-            hits = [(int(r["freq_hz"]), 1.0) for r in store.rows("SELECT freq_hz FROM carriers WHERE last_seen >= ?", (now - 30 * 86400,))]
-            weight, wanted = _best_window(hits, usable - 2 * DC_GUARD_HZ)
+            weight, wanted = _best_window([(f, 1.0) for f in known], usable - 2 * DC_GUARD_HZ)
             reason = "busiest known slice"
         if not wanted:
             raise ValueError("nothing known to watch: run a survey first, or give a centre frequency or carriers")
         center = (min(wanted) + max(wanted)) // 2
-        pin_from = [f for f in wanted if f in controls]
+    if net is not None:
+        system = f"tier3 {net[0]} net {net[1]}"
     raster = _raster_for(cfg, center)
-    center = off_dc(int(center), list(wanted) or [int(center) + DC_GUARD_HZ], usable)
+    # keep every known carrier of the slice off the receiver's DC point, not only the wanted ones
+    span = [f for f in set(known) | set(wanted) if abs(f - center) <= usable / 2]
+    center = off_dc(int(center), list(wanted) or span or [int(center) + DC_GUARD_HZ], usable)
     half = usable / 2
+    explicit = sorted(f for f in set(known) | set(wanted) if abs(f - center) <= half)
+    blind = [f for f in explicit if abs(f - center) < DC_GUARD_HZ]
+    explicit = [f for f in explicit if f not in blind]
+    # the raster, except where a known carrier sits off it: that one is watched at its own frequency
+    # (a carrier 2.5 kHz off the raster would otherwise key up twice, as itself and as its raster twin)
     first = int(math.ceil((center - half) / raster)) * raster
-    channels = [f for f in range(first, int(center + half) + 1, raster) if abs(f - center) >= DC_GUARD_HZ]
-    n_pin = min(len(pin_from), max(1, limit // 2)) if pin_from else 0
-    pinned = sorted(pin_from, key=lambda f: -(controls.get(f, {}).get("control", 0)))[:n_pin]
-    # a carrier off the raster (pinned by request) is watched as it is
-    channels = sorted(set(channels) | set(pinned))
-    return WatchPlan(int(center), channels, sorted(pinned), reason, raster, system)
+    channels = [r for r in range(first, int(center + half) + 1, raster)
+                if abs(r - center) >= DC_GUARD_HZ and not any(0 < abs(r - f) < raster / 2 for f in explicit)]
+    channels = sorted(set(channels) | set(explicit))
+    # only known control channels are pinned, at most half the decoders (one on battery)
+    pin_from = [f for f in explicit if f in controls and (net is None or controls[f]["net"] == net)]
+    n_pin = min(len(pin_from), max(1, limit // 2))
+    pinned = sorted(sorted(pin_from, key=lambda f: -controls[f]["control"])[:n_pin])
+    # who gets a decoder first when several channels key up: the network's own traffic channels (and
+    # carriers asked for), then anything unknown, then carriers known to belong elsewhere
+    priority: dict[int, int] = {}
+    for f in channels:
+        if f in wanted and f not in controls:
+            priority[f] = 0
+        elif f in t3 and net is not None and t3[f]["net"] == net and not t3[f]["is_control"]:
+            priority[f] = 0
+        elif f in known and (known[f] not in ("unknown", "tier2") or f in controls):
+            priority[f] = 2
+        else:
+            priority[f] = 1
+    return WatchPlan(int(center), channels, pinned, reason, raster, system, priority, blind)
 
 
 @dataclass
@@ -187,11 +213,14 @@ class _Chan:
 class KeyupDetector:
     """Per raster channel: key-up after ``min_blocks`` blocks over ``on_db``, key-down when under
     ``off_db`` for ``hang_s``. The noise floor is the median channel (most of a slice is empty).
-    A channel whose neighbour is more than 6 dB stronger is the neighbour's skirt, not a carrier."""
+    A channel whose neighbour is more than ``skirt_db`` stronger is that neighbour's skirt, not a
+    carrier: a DMR signal leaves well under 1 % of its power in the next 12.5 kHz channel, so only
+    a very strong neighbour (or the receiver's own spread around it) can lift an empty channel."""
 
-    def __init__(self, freqs: list[int], on_db: float = 10.0, off_db: float = 6.0, hang_s: float = 2.0, min_blocks: int = 2):
+    def __init__(self, freqs: list[int], on_db: float = 10.0, off_db: float = 6.0, hang_s: float = 2.0, min_blocks: int = 2,
+                 skirt_db: float = 25.0):
         self.freqs = [int(f) for f in freqs]
-        self.on_db, self.off_db, self.hang_s, self.min_blocks = on_db, off_db, hang_s, min_blocks
+        self.on_db, self.off_db, self.hang_s, self.min_blocks, self.skirt_db = on_db, off_db, hang_s, min_blocks, skirt_db
         self.state = {f: _Chan() for f in self.freqs}
         self.noise: float | None = None
         self.snr = np.zeros(len(self.freqs))
@@ -204,7 +233,7 @@ class KeyupDetector:
         self.snr = snr
         left = np.concatenate([[-np.inf], snr[:-1]])
         right = np.concatenate([snr[1:], [-np.inf]])
-        not_skirt = (left <= snr + 6) & (right <= snr + 6)
+        not_skirt = (left <= snr + self.skirt_db) & (right <= snr + self.skirt_db)
         started: list[int] = []
         ended: list[Keyup] = []
         for i, f in enumerate(self.freqs):
@@ -248,18 +277,33 @@ class KeyupDetector:
 
 @dataclass
 class InstancePlanner:
-    """Which channels have a DSD-FME. Pinned channels always; then active channels in the order
-    they keyed up; a floating channel held for ``max_hold_s`` gives way to a waiting one and is
-    not taken again until it has keyed down."""
+    """Which channels have a DSD-FME. Pinned channels always. Then the waiting channels by
+    ``priority`` (0 the network's traffic channels, 1 unknown, 2 known to belong elsewhere) and,
+    within one priority, the most recent key-up first (a call is short; a carrier keyed since the
+    start of the session is most likely a continuous one). A waiting channel takes the decoder of
+    a lower-priority one at once, and of an equal one that has held it for ``max_hold_s``; the
+    channel that gave way is not taken again until it has keyed down."""
 
     pinned: list[int]
     limit: int
     max_hold_s: float = 30.0
+    priority: dict[int, int] = field(default_factory=dict)
     assigned: dict[int, float] = field(default_factory=dict)     # freq → since when it has a decoder
     cooldown: set[int] = field(default_factory=set)
 
     def __post_init__(self) -> None:
         self.pinned = list(self.pinned)[:max(1, self.limit)]
+
+    def _prio(self, f: int) -> int:
+        return self.priority.get(f, 1)
+
+    def _victim(self, t: float, prio: int) -> int | None:
+        floating = [(g, since) for g, since in self.assigned.items() if g not in self.pinned]
+        lower = [(self._prio(g), -since, g) for g, since in floating if self._prio(g) > prio]
+        if lower:
+            return max(lower)[2]                    # the lowest priority, longest held
+        held = [(since, g) for g, since in floating if self._prio(g) == prio and t - since >= self.max_hold_s]
+        return min(held)[1] if held else None
 
     def plan(self, t: float, active: dict[int, float]) -> tuple[list[int], list[int]]:
         start: list[int] = []
@@ -273,14 +317,13 @@ class InstancePlanner:
                 del self.assigned[f]
                 stop.append(f)
         self.cooldown &= set(active)
-        waiting = sorted((since, f) for f, since in active.items()
-                         if f not in self.assigned and f not in self.cooldown and f not in self.pinned)
-        for _, f in waiting:
+        waiting = sorted((f for f in active if f not in self.assigned and f not in self.cooldown and f not in self.pinned),
+                         key=lambda f: (self._prio(f), -active[f]))
+        for f in waiting:
             if len(self.assigned) >= self.limit:
-                held = [(since, g) for g, since in self.assigned.items() if g not in self.pinned and t - since >= self.max_hold_s]
-                if not held:
-                    break
-                _, g = min(held)
+                g = self._victim(t, self._prio(f))
+                if g is None:
+                    continue        # a later waiter may still have a lower-priority channel to take
                 del self.assigned[g]
                 stop.append(g)
                 self.cooldown.add(g)

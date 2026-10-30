@@ -35,13 +35,14 @@ def test_tier3(store, cfg):
     assert st.unrecognized_total == 0 and st.variant == "tier3"
     sysp = _events(store, "tier3_sys_parms")
     aloha = next(p for p in sysp if p["source"] == "c_aloha_sys_parms")
-    assert aloha["net_id"] == 1 and aloha["site_id"] == 7 and aloha["sys_code"] == "1A2B" and aloha["model"] == "Small"
+    # "Net ID: 1; Site ID: 7" without a sub-site is DSD-FME's raw numbering: kept as -D 0 prints it (net 2, site 1.8)
+    assert (aloha["net_id"], aloha["site_id"], aloha["sub_site"]) == (2, 1, 8) and aloha["sys_code"] == "1A2B" and aloha["model"] == "Small"
     slc = next(p for p in sysp if p["source"] == "slc_c_sys_parms")
     assert slc["reg"] == 1
     bcasts = {p["a_type"]: p for p in _events(store, "tier3_bcast")}
     adj = bcasts["adjacent_site"]
     assert adj["online"] is True and adj["cc_pri"] == 1 and adj["ac_pri"] == 2 and adj["lpcn"] == 1234
-    assert adj["adj_site_id"] == 8 and adj["adj_net_id"] == 1 and adj["sys_code"] == "1A2B"
+    assert (adj["adj_net_id"], adj["adj_site_id"], adj["adj_sub_site"]) == (2, 1, 9) and adj["sys_code"] == "1A2B"
     cf = bcasts["chan_freq"]
     assert cf["apcn"] == 410 and cf["rx_freq_hz"] == 165_125_000 and cf["tx_freq_hz"] == 170_125_000 and cf["rx_step_hz"] == 12500
     assert bcasts["vote_now"]["lpcn"] is None
