@@ -56,6 +56,16 @@ decode:
   raw_log_max_mb: 50           # rotation size cap per raw log
   raw_log_keep: 5              # rotated files kept
 
+watch:                         # mapper watch / console key w: one slice, DSD-FME on whatever keys up (Phase 4)
+  keyup_snr_db: 10             # a raster channel this far over the slice's median channel for 0.2 s has keyed up
+  keydown_snr_db: 6            # ... and has keyed down after hang_s under this
+  hang_s: 2.0
+  min_keyup_s: 0.5             # shorter bursts are counted, not stored
+  preroll_s: 0.5               # audio from before the key-up fed to the new DSD-FME (rebuilt from kept FFT blocks)
+  max_hold_s: 30               # a channel decoded this long gives way when another one is waiting
+  max_instances: 6             # DSD-FME at once on mains (control channels pinned: up to half of them)
+  channel_width_hz: 10000      # power measured over this width around each raster channel
+
 ingest:
   bucket_minutes: 15           # observation aggregation bucket
 
@@ -81,12 +91,14 @@ gps:                           # the receiver's own position; read only while a 
 retention:
   identity_days: 90            # radio IDs, talkgroups and the events carrying them are deleted after this
   track_days: 0                # the receiver's own GPS track; 0 = keep
+  keyup_days: 180              # key-ups seen by watch sessions (no identities in them); 0 = keep
                                # radios' own positions (LRRP) are never stored
 
 power:
   state_file: ""               # JSON left by a power guard service (e.g. /run/dmr/power.json); set in config.local.yaml
   state_max_age_s: 120         # ignore the file when it is older than this
   battery_max_instances: 2     # DSD-FME instances when not on a confirmed full supply
+  battery_watch_instances: 3   # in a watch session on battery: one pinned control channel + two traffic channels
   battery_session_s: 1200      # default session length on battery
   stop_on_undervoltage: true   # stop a running session when the firmware reports undervoltage now
 
@@ -98,6 +110,8 @@ correlator:
     explicit_lcn_freq: 0.95
     explicit_same_site: 0.70
     behavioral_rest_hop: 0.50
+    behavioral_lsn_table: 0.60
+    behavioral_lcn_keyup: 0.70  # Capacity Max: a channel update names the LCN of a carrier that keys up / carries the call
     identity_radio: 0.30
     identity_talkgroup: 0.15
     identity_slco: 0.20         # Tier II: the same undecoded SLCO content repeated on two carriers

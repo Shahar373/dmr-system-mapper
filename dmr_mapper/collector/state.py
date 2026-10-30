@@ -15,8 +15,8 @@ from typing import Any
 
 from ..db import Store, canonical_json
 
-COMMAND_KINDS = ("start_survey", "start_decode", "stop", "correlate", "export")
-SESSION_KINDS = ("survey", "decode")
+COMMAND_KINDS = ("start_survey", "start_decode", "start_watch", "stop", "correlate", "export")
+SESSION_KINDS = ("survey", "decode", "watch")
 
 
 def _now() -> int:

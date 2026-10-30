@@ -68,6 +68,7 @@ class SynthCarrier:
     audio: np.ndarray | None = None      # float32 in -1..1 at audio_rate; None = unmodulated tone-free carrier
     audio_rate: float = 48000.0
     deviation_hz: float = 2500.0         # peak deviation for |audio| = 1
+    on: list[tuple[float, float]] | None = None   # keyed only during these (start_s, end_s) of source time; None = always
     phase: float = 0.0
     audio_pos: float = 0.0
 
@@ -77,7 +78,7 @@ class SyntheticSource:
     Deterministic given ``seed``; generated on demand so any amount can be read."""
 
     def __init__(self, sample_rate: float = 2_400_000.0, center_hz: float = 165_000_000.0,
-                 carriers: list[SynthCarrier] | None = None, seed: int = 1, noise_db: float = -20.0):
+                 carriers: list[SynthCarrier] | None = None, seed: int = 1, noise_db: float = -20.0, realtime: bool = False):
         self.sample_rate = float(sample_rate)
         self.center_hz = float(center_hz)
         self.carriers = carriers or []
@@ -85,6 +86,9 @@ class SyntheticSource:
         self._noise_amp = 10 ** (noise_db / 20)
         self.closed = False
         self.reads = 0
+        self.samples = 0                  # source time = samples / sample_rate
+        self.realtime = realtime          # pace reads like a receiver stream (tests with live decoders)
+        self._t0: float | None = None
 
     def tune(self, center_hz: float) -> None:
         self.center_hz = float(center_hz)
@@ -94,6 +98,14 @@ class SyntheticSource:
 
     def read(self, n: int) -> np.ndarray:
         self.reads += 1
+        if self.realtime:
+            if self._t0 is None:
+                self._t0 = time.monotonic()
+            ahead = (self.samples + n) / self.sample_rate - (time.monotonic() - self._t0)
+            if ahead > 0:
+                time.sleep(ahead)
+        t_start = self.samples / self.sample_rate
+        self.samples += n
         out = (self._rng.standard_normal(n) + 1j * self._rng.standard_normal(n)).astype(np.complex64) * (self._noise_amp / np.sqrt(2))
         half = self.sample_rate / 2
         for c in self.carriers:
@@ -112,7 +124,14 @@ class SyntheticSource:
             # the discriminator turns into kilohertz of noise
             ph = c.phase + np.cumsum(inst, dtype=np.float64)
             c.phase = float(ph[-1] % (2 * np.pi))
-            out += (amp * np.exp(1j * ph)).astype(np.complex64)
+            sig = amp * np.exp(1j * ph)
+            if c.on is not None:
+                t = t_start + np.arange(n) / self.sample_rate
+                keyed = np.zeros(n, dtype=bool)
+                for a, b in c.on:
+                    keyed |= (t >= a) & (t < b)
+                sig = sig * keyed
+            out += sig.astype(np.complex64)
         return out
 
     def close(self) -> None:

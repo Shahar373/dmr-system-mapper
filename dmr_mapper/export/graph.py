@@ -11,6 +11,8 @@ from ..correlate.model import LABELS
 from ..db import Store
 
 LABEL_RANK = {label: i for i, label in enumerate(LABELS)}   # confirmed=0 … weak=3
+# a system's or site's name, when the operator gave one, before its automatic label
+_NAMED = "CASE WHEN {t}.name IS NOT NULL THEN {t}.name || ' (' || {t}.label || ')' ELSE {t}.label END"
 
 
 def build(store: Store, min_label: str = "possible", include_announced: bool = True) -> nx.Graph:
@@ -21,8 +23,8 @@ def build(store: Store, min_label: str = "possible", include_announced: bool = T
     g = nx.Graph()
     site_of: dict[int, dict[str, Any]] = {}
     for r in store.rows(
-            "SELECT cs.carrier_id, cs.lcn, cs.confidence, s.id AS site_id, s.site_number, s.label AS site_label, s.system_id,"
-            " sy.label AS system_label, sy.variant AS system_variant FROM carrier_sites cs JOIN sites s ON s.id = cs.site_id"
+            f"SELECT cs.carrier_id, cs.lcn, cs.confidence, s.id AS site_id, s.site_number, {_NAMED.format(t='s')} AS site_label, s.system_id,"
+            f" {_NAMED.format(t='sy')} AS system_label, sy.variant AS system_variant FROM carrier_sites cs JOIN sites s ON s.id = cs.site_id"
             " JOIN systems sy ON sy.id = s.system_id"):
         site_of[int(r["carrier_id"])] = dict(r)
     for c in store.carriers():
@@ -34,9 +36,11 @@ def build(store: Store, min_label: str = "possible", include_announced: bool = T
                    system_id=meta.get("system_id"), system_label=meta.get("system_label"), lcn=meta.get("lcn"),
                    activity=_activity(store, int(c["id"])))
     if include_announced:
-        for s in store.rows("SELECT s.*, sy.label AS system_label FROM sites s JOIN systems sy ON sy.id = s.system_id WHERE s.directly_observed = 0"):
+        for s in store.rows(f"SELECT s.*, {_NAMED.format(t='s')} AS shown, {_NAMED.format(t='sy')} AS system_label"
+                            " FROM sites s JOIN systems sy ON sy.id = s.system_id WHERE s.directly_observed = 0"):
             node = f"s{s['id']}"
-            g.add_node(node, kind="site", site_id=int(s["id"]), site_number=s["site_number"], label=f"site {s['site_number']}",
+            g.add_node(node, kind="site", site_id=int(s["id"]), site_number=s["site_number"], label=s["name"] or s["label"].split(" (")[0],
+                       site_label=s["shown"],
                        system_id=s["system_id"], system_label=s["system_label"], announced_only=True)
             # attach to every carrier of the same system that announced it
             for cid, meta in site_of.items():

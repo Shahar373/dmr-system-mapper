@@ -93,7 +93,8 @@ def test_tier2_links_are_capped_and_marked(synth_store):
     l = _link(links, 164_300_000, 164_325_000, "same_system")
     assert l is not None and l["tier2_only"] and l["score"] <= 0.6 and l["label"] != "confirmed"
     ex = explain(synth_store, l["id"], None, now=NOW)
-    assert {e["type"] for e in ex["evidence"]} <= {"identity_radio", "identity_talkgroup", "rf_profile"}
+    # the shared talkgroups also show in their Activity Updates (same hashed address): Tier II evidence too
+    assert {e["type"] for e in ex["evidence"]} <= {"identity_radio", "identity_talkgroup", "identity_slco", "rf_profile"}
     assert _link(links, 164_300_000, 167_137_500) is None   # different radios, different CC
 
 

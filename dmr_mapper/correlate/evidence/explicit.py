@@ -104,10 +104,17 @@ def neighbor(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
             if variant == "capplus" and abs(a.freq_hz - b.freq_hz) > cfg.same_site_max_span_hz * 4:
                 continue   # Cap+ site numbers repeat across unrelated networks; keep neighbours regional
             raw = 1.0 if (a_says_b and b_says_a) else 0.65
-            out.append(_pair_ev(a, b, "neighbor_site", "explicit_neighbor", raw, {
-                "variant": variant, "a_site": _key_str(ka), "b_site": _key_str(kb),
-                "bidirectional": a_says_b and b_says_a, "a_announces_b": a_says_b, "b_announces_a": b_says_a,
-            }))
+            details = {"variant": variant, "a_site": _key_str(ka), "b_site": _key_str(kb),
+                       "bidirectional": a_says_b and b_says_a, "a_announces_b": a_says_b, "b_announces_a": b_says_a}
+            ev = _pair_ev(a, b, "neighbor_site", "explicit_neighbor", raw, details)
+            if variant == "tier3":
+                # the channel a neighbour announces is that site's control channel: on Capacity Max its LCN
+                for x, kx in ((a, ka), (b, kb)):
+                    lcn = ctx.announced_channel(kx[1], kx[2])
+                    if lcn is not None and x.t3_control:
+                        details[f"{'a' if x is a else 'b'}_announced_channel"] = lcn
+                        ev.lcn_hints[x.freq_hz] = lcn
+            out.append(ev)
     return out
 
 

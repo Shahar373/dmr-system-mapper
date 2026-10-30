@@ -48,6 +48,8 @@ def format_report(results: Iterable[IngestStats], top_unrecognized: int = 15) ->
             parts = [f"{k}={v}" + (f"→{st.stored_events.get(k, 0)} rows" if st.stored_events.get(k, 0) != v else "")
                      for k, v in sorted(st.structural.items(), key=lambda kv: -kv[1])]
             out.append("   structural: " + ", ".join(parts))
+        if st.csbk_opcodes:
+            out.append("   raw CSBKs (-Z): " + ", ".join(f"{k}={v}" for k, v in st.csbk_opcodes.most_common(8)))
         if st.rest_transitions:
             out.append(f"   rest-channel transitions: {st.rest_transitions}")
         if st.identities:

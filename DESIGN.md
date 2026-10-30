@@ -2,9 +2,9 @@
 
 Passive DMR network topology mapper. It links VHF/UHF carriers into logical systems and sites,
 stores a confidence score and the evidence behind every link, and exposes the result to Claude Code
-through an MCP server on the Raspberry Pi.
+through an MCP server on the Raspberry Pi (Phase 5).
 
-This document is the contract for Phases 1–4. Everything here is testable offline on `samples/`.
+This document is the contract for Phases 1–5. Everything here is testable offline on `samples/`.
 
 Contents
 
@@ -60,7 +60,8 @@ inspects evidence and may *propose* links; a proposal is just one more evidence 
 | `mapper daemon` | Pi (systemd) | 3a | Idle until asked; survey and decode sessions with a time budget; single writer of decoded data |
 | `mapper tui` | Pi, over SSH | 3a | Operator console: status, start/stop, carriers, survey hits, systems, sessions |
 | deployment | Pi | 3b | `dmr-mapper` systemd service, `deploy/deploy.sh`, nightly snapshot/export timer, archive Pi pulls with a read-only `rrsync` key (DEPLOY.md) |
-| MCP server | Pi (HTTP over Tailscale) | 4 | Tools for Claude Code on the laptop |
+| `mapper watch` / `name` | Pi / laptop | 4 | Watch sessions (one slice, decoders on key-up), Capacity Max from raw bytes, names for systems and sites |
+| MCP server | Pi (HTTP over Tailscale) | 5 | Tools for Claude Code on the laptop |
 
 The daemon, the console and the CLI share one library (`dmr_mapper`) and one database. The
 receiver is shared with other SDR services on the Pi, so nothing runs on a timer: work happens in
@@ -69,7 +70,7 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
 ### Daemon, sessions and the command queue (Phase 3a)
 
 - **One control channel.** Clients only insert rows into `commands` (`start_survey`, `start_decode`,
-  `stop`, `correlate`, `export`) and read `daemon_state` and `sessions`. The daemon claims commands
+  `start_watch`, `stop`, `correlate`, `export`) and read `daemon_state` and `sessions`. The daemon claims commands
   atomically, writes a heartbeat every tick, and is the only process that opens the receiver. A
   console, the CLI and the MCP server therefore can never fight over the tuner.
 - **One daemon per database**, enforced by an `flock` on `<db>.daemon.lock` (released by the kernel
@@ -95,7 +96,21 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   into one queue, parsed and written by the session thread, committed after every block so no
   write lock is held. A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is
   restarted with `-xr`. Survey SNR is copied into `observations.snr_db_*`.
-- **After a decode session** the correlator runs (`daemon.correlate_after_decode`).
+- **Watch** (Phase 4, `collector/watch.py`): for networks whose traffic channels transmit only during
+  calls (Capacity Max). One slice for the whole session, planned around the Tier III network with
+  the most known carriers that fit (control channels count double), or around given carriers or a
+  centre, off the DC point. Every 0.1 s block: the power of every raster channel from the
+  channelizer's FFT (mean over ±5 kHz), noise floor = median channel, key-up after two blocks over
+  `watch.keyup_snr_db` (a channel 6 dB under its neighbour is that neighbour's skirt), key-down
+  after `hang_s` under `keydown_snr_db`. Control channels are pinned (at most half the instances);
+  a channel that keys up gets a DSD-FME at once, and its audio is first rebuilt from the last
+  `preroll_s` of kept FFT blocks and buffered in the PCM bridge until DSD-FME connects, so the call
+  header before the detection is not lost. One DSD-FME process per transmission, so its lines can
+  only belong to that carrier; one ingest run per carrier per session. A channel decoded for
+  `max_hold_s` gives way to a waiting one. Instances: `watch.max_instances` (6) on mains,
+  `power.battery_watch_instances` (3) on battery, 1 on undervoltage. Key-ups go to `keyups`;
+  a carrier first heard this way is created. Polarity retry is not done in watch sessions.
+- **After a decode or watch session** the correlator runs (`daemon.correlate_after_decode`).
 - **One button** (`a` in the console, `mapper survey --then-decode`): a survey, then a decode
   session with whatever is left of the one budget. Sessions are short and random (driving, battery).
 - **GPS** (Phase 3c), read only while a session runs: gpsd when it is running (shared safely), else
@@ -335,7 +350,15 @@ CREATE TABLE positions (id, session_id, ts, lat, lon, alt_m, speed_mps, fix, sou
 -- survey_hits gains lat, lon: where the receiver was at the step where the hit was strongest.
 -- LRRP payloads keep only has_position; radios' coordinates are never stored (and were removed).
 
-CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 4
+-- Phase 4 (migration 005): what a watch session heard, and the names the operator gives.
+CREATE TABLE keyups (id, carrier_id, session_id, start REAL, end REAL, peak_snr_db, decoded);   -- one row per transmission
+CREATE TABLE names (id, kind,                -- system|site
+                    anchor,                  -- on-air identity: tier3:<model>:<net>[:<site>], conplus:<net>[:<site>]; NULL = by carriers
+                    carriers,                -- JSON: carrier frequencies when it was named
+                    name, created, updated);
+-- systems and sites gain anchor (the same identity strings) and name (filled from names after every derive).
+
+CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 5
 ```
 
 Migrations run inside one transaction each (`BEGIN … COMMIT`), so a failed migration leaves no
@@ -354,12 +377,19 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
   accepted only when no Channel Status CSBK was seen in the last 10 s, because the short LC lags
   the CSBK and would otherwise create spurious A→B→A transitions.
 - `capplus_site`, `capplus_adjacent`, `conplus_adjacent`, `conplus_sys`, `tier3_bcast`,
-  `tier3_sys_parms`, `xpt_site_status`, `xpt_adjacent`, `xpt_slco`, `moto_data_channel`: one row per
-  distinct `payload` per carrier per UTC day, with `count` incremented on repeats.
+  `tier3_sys_parms`, `xpt_site_status`, `xpt_adjacent`, `xpt_slco`, `moto_data_channel`, `capmax_slco`:
+  one row per distinct `payload` per carrier per UTC day, with `count` incremented on repeats.
+  `tier3_sys_parms` ignores the common slot counter (`csc`), which changes every frame (before
+  Phase 4 a control channel made hundreds of rows a day).
 - `preamble`, `data_header`, `ip_map`, `lrrp`, `grant`, `activity_update`, `protected_lc`,
   `capplus_rest_change`: one row per distinct payload per carrier per hour.
-- `call` (voice/data call start from the LC: slot, src, tgt): one row per minute, so the
-  `behavioral_lsn_table` evidence can align calls with LSN lists.
+- `call` (voice/data call start from the LC: slot, src, tgt) and `capmax_channel_update`: one row
+  per minute, so `behavioral_lsn_table` / `behavioral_lcn_keyup` can align calls with LSN lists and
+  channel updates. `capmax_activity`: per hour.
+- `SLCO Completed Block` and `DMR PDU Payload` lines (with `-Z`) are never stored: they correct or
+  complete the event of the line DSD-FME printed before them, or are decoded into one of the kinds
+  below; a CSBK nobody decodes is counted per FID/opcode (`csbk_opcodes` in the ingest report) and
+  reported once with its bytes as an unrecognized pattern.
 - Voice frames, IDLE, `SLCO NULL`, CRC errors are **never** stored as events; they only feed
   `observations` counters.
 
@@ -388,7 +418,10 @@ Storing every CSBK would blow the budget (the Cap+ sample has 9 245 `Channel Sta
 | `lrrp` | `src, tgt, direction, lat, lon` |
 | `protected_lc` | `slot, lc: protected|unknown, flco, fid` (lines with `(CRC ERR)` only feed the error counter) |
 | `data_response` | `tgt, src, text` (`DATA RESP` acknowledgements) |
-| `slco_other` | `text` (Cap Max / Caltta / unknown SLCO, per distinct text per day) |
+| `slco_other` | `text`, `opcode`, `data` (Caltta / unknown SLCO, per distinct text per day; data from its Completed Block) |
+| `capmax_channel_update` | `mode: open|advantage, lcn, slot, tg` (CSBK FID 0x10 opcode 0x21/0x22 from `DMR PDU Payload`; Advantage mode carries 10-bit short TG ids) |
+| `capmax_activity` | `tgt` (`SLCO Cap Max Activity Update`) |
+| `capmax_slco` | `opcode: 15, data, printed_as` (SLCO 0xF on a stream that carried Tier III system parameters: DSD-FME prints it as a Cap+ site) |
 | `unknown_csbk` | `text` (first 120 chars; one row per distinct text per day; what `ingest` reports as unrecognized CSBK) |
 
 ## 4. Evidence model
@@ -405,9 +438,10 @@ belong to a **class** that carries the config weight and decay constant.
 | `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 2 site 1.2 = `2101`, site 1.3 = `2102`); Con+: same Net ID |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
 | `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
+| `behavioral_lcn_keyup` | behavioral | 0.70 | `(1 − 0.6^n) × agreement`; a call to the TG on the same slot = 1 match, a key-up within ±3 s = ½ shared by all carriers that keyed up then | `same_site` | Cap Max: control channel A announces TG T on LCN L (channel update); carrier B carries the call to T, or keys up, at that moment → B is LCN L of A's site. Carriers whose own short LC names another site are never matched (a group call goes out on every site) |
 | `identity_radio` | identity | 0.30 | `min(1, shared_radios / 5)` | `same_system` | the same radio ID seen as `src` on both carriers within 24 h |
 | `identity_talkgroup` | identity | 0.15 | `min(1, shared_tgs / 3)` | `same_system` | the same TG on both carriers within 24 h (low: TG numbers are reused across unrelated systems) |
-| `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same undecoded SLCO payload (`SLCO Completed Block [..]`, `SLCO Unknown`) repeated ≥ 3 times on both carriers, same colour code; payloads present on more than max(4, half) of the carriers count as vendor defaults and are ignored. Field run 2026-10-30: two VHF Tier II repeaters shared two such payloads |
+| `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same short-LC content repeated ≥ 3 times on both carriers, same colour code: an Activity Update (slot activity + hashed address, from DSD-FME's line or from an old `SLCO Completed Block` row: both give one text), an SLCO nothing decodes (`SLCO Unknown`, Cap Max 0xF bits); all-idle updates and short LCs decoded explicitly elsewhere are left out; content present on more than max(4, half) of the carriers counts as a vendor default. Field run 2026-10-30: two VHF Tier II repeaters shared two Activity Updates (the same hashed talkgroups) |
 | `rf_profile` | rf | 0.10 | correlation of activity-per-bucket profiles (Pearson over ≥ 24 shared buckets, clipped to 0..1), only when colour codes match | `same_system` | observations |
 | `manual` | manual | 1.00 | as given by `propose_link` (0..1) | any | MCP / CLI |
 
@@ -485,11 +519,20 @@ parser. Summary of what the correlator can use:
 | Cap+ | `SLCO Capacity Plus Site: n` | — (site numbers are per-network; Linked Cap+ neighbours tie them) | `Capacity Plus Adjacent Sites` | LSN 1–16 per site, learned from rest hops; `LCN = (LSN+1)//2`, `slot = (LSN−1)%2+1` |
 | Con+ | `Site ID` | `Net ID` | `Connect Plus Adjacent Sites` | LCN from grants; frequency only via observation |
 | Tier III | `Site ID` + sub-site (Large model prints `1.3`; stored as site×100+sub) | `Net ID` + model (the `SYS` code changes with the site) | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
+| Capacity Max (Tier III, Motorola) | as Tier III | as Tier III | `Adjacent_Site` whose channel is the neighbour control channel's LCN (read from the bytes: DSD-FME omits it when "connection information" is not available) | channel updates (FID 0x10 opcode 0x21/0x22): TG per LCN and slot, matched with calls and key-ups (`behavioral_lcn_keyup`) |
 | XPT | `XPT Adjacent Site:n` | — | `XPT Adjacent` | `Free LCN`, LSN status list |
 
 Phase 1 result on `samples/`: 0 unrecognized lines on all 16 logs; the Cap+ capture yields 9 245
 channel-status CSBKs (105 rows after de-duplication), 149 adjacent-site CSBKs (2 rows), 46
 rest-channel transitions, 25 LRRP responses and 12 identities, in a 200 KB database.
+
+**Tier III numbering.** `-D 0` does not do what its help text suggests: DSD-FME reads the value
+as a character, so `0` is 48, clamped to 10. Every Tier III identity then prints as
+`Net ID: net+1; Site ID: 1.site+1` (raw net 1 site 1 = `Net ID: 2; Site ID: 1.2`, SYS `2101`; this is
+the offset against SDRTrunk). But once DSD-FME has decoded one Motorola (FID 0x10) Aloha or
+broadcast it switches the whole process to raw `Net ID: net; Site ID: site`. The parser keeps the
+first numbering throughout: it converts raw prints after that point, and with `-Z` it takes every
+identity from the bytes (the 14-bit system identity code: 2 bits model, then net and site).
 
 Only Cap+ (three sites) and Tier II are present in `samples/`. Con+, Tier III and XPT parsers are
 written from the DSD-FME source print formats and unit-tested on synthetic lines; they are flagged
@@ -544,7 +587,10 @@ def write(graph, path)                                      # single static HTML
 # dmr_mapper/collector/   (Phase 3a)  state.py (queue), daemon.py, sdr.py (Soapy / file / synthetic), survey.py,
 #                         channelizer.py, bridge.py (PCM→TCP), decoder.py, ingest.py, scheduler.py, power.py
 # dmr_mapper/tui/app.py   (Phase 3a)  Textual console
-# dmr_mapper/mcp/server.py (Phase 4)
+# dmr_mapper/collector/watch.py (Phase 4)  plan_watch, KeyupDetector, InstancePlanner; Daemon._watch drives them
+# dmr_mapper/ingest/rawpdu.py   (Phase 4)  CRCs, CSBK / short-LC bit fields from DSD-FME's -Z bytes
+# dmr_mapper/correlate/evidence/capmax.py, correlate/names.py (Phase 4)
+# dmr_mapper/mcp/server.py (Phase 5)
 ```
 
 CLI (`mapper`, argparse):
@@ -556,14 +602,15 @@ mapper systems [--min-label possible] [--json]
 mapper explain <link-id | freqA freqB>
 mapper export [--html PATH] [--graphml PATH] [--min-label possible]
 mapper daemon | tui | survey | decode | stop | doctor | capture-iq   (Phase 3a)
-mapper serve-mcp (Phase 4)
+mapper watch [FREQ ...] [--center HZ] [--minutes N] | name system|site TARGET NAME [--clear] | names   (Phase 4)
+mapper serve-mcp (Phase 5)
 ```
 
 ## 8. Configuration
 
 `config.example.yaml` is committed; `config.local.yaml` (git-ignored) is deep-merged over it.
 Lookup order: `--config PATH`, `$DMR_MAPPER_CONFIG`, `./config.local.yaml`, `./config.example.yaml`.
-Keys: `paths`, `timezone`, `sdr`, `survey.bands[]`, `survey.*`, `decode.*`, `ingest.bucket_minutes`,
+Keys: `paths`, `timezone`, `sdr`, `survey.bands[]`, `survey.*`, `decode.*`, `watch.*`, `ingest.bucket_minutes`,
 `correlator.{weights,decay_days,labels,tier2_max_confidence,interval_minutes,window_days}`, `archive.*`, `mcp.*`.
 See the example file for every key and its meaning. Machine-specific values (Tailscale address,
 device serials, archive host, band plans) are only ever set in `config.local.yaml`.
@@ -589,7 +636,7 @@ are kept only when `decode.keep_raw_logs` is true, with rotation `raw_log_max_mb
 to `var/snapshots/` (newest `archive.keep_local` kept on the SD card); the archive Pi **pulls** that
 folder with a key restricted to read-only rsync of it, and keeps 14 daily + 8 weekly copies.
 
-## 10. MCP tools
+## 10. MCP tools (Phase 5)
 
 Transport: streamable HTTP (`mcp` Python SDK), bound to the Pi's Tailscale address only, no
 token (the tailnet is the trust boundary). All tools return JSON; long operations return a job id
@@ -610,7 +657,7 @@ that `get_status` reports on.
 Guard rails: `propose_link` and `correlate_now` are the only writers; `decode_channel` and
 `scan_band` preempt the collector's queue for the requested duration and then hand the tuner back.
 
-`.mcp.json` on the laptop (Phase 4):
+`.mcp.json` on the laptop (Phase 5):
 
 ```json
 { "mcpServers": { "dmr-mapper": { "type": "http", "url": "http://<pi-tailscale-ip>:8765/mcp" } } }
@@ -625,7 +672,7 @@ dmr_mapper/            package (phases 1–4)
   ingest/    dsdfme.py  surveyor.py  writer.py  events.py
   correlate/ engine.py  evidence/*.py  derive.py
   export/    graph.py  html.py
-  collector/ (Phase 3a)  tui/ (Phase 3a)  mcp/ (Phase 4)
+  collector/ (Phase 3a; watch.py Phase 4)  tui/ (Phase 3a)  mcp/ (Phase 5)
 tests/                 pytest, fixtures from samples/ + tests/fixtures/synthetic/
 samples/               checked-in DSD-FME logs (see README)
 deploy/                systemd unit templates, deploy.sh, archive-pull.sh (Phase 3b)
@@ -636,8 +683,16 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 
 - **No rf evidence fixture.** `samples/surveyor` has no candidate list with SNR. `rf_profile`
   is implemented against `observations` and tested synthetically; its weight is deliberately low.
-- **Con+ / Tier III / XPT untested on air.** Parsers follow the DSD-FME source formats; the
-  ingest report labels their counts `untested_on_air` until a real log is added to `samples/`.
+- **Con+ / Tier III / Capacity Max / XPT untested on air.** Parsers follow the DSD-FME source
+  formats (and SDRTrunk's bit layouts for the Motorola messages); the ingest report labels their
+  counts `untested_on_air` until a real log is added to `samples/`. A 5-minute raw log of the
+  469 MHz control channels (`decode.keep_raw_logs: true`) is the next thing to check them against;
+  `csbk_opcodes` in its ingest report will show which Motorola opcodes the network really sends.
+- **The field database had no CSBK from the Capacity Max control channels**, only short LCs, and
+  its numbering never switched to raw: DSD-FME decoded no Motorola Aloha or broadcast there, so
+  those CSBKs failed their CRC or were not sent as this build expects. The raw log will tell.
+- **Activity Update hash** (`rawpdu.address_hash`): CRC-8 of the 16 least significant address
+  bits, as DSD-FME computes the Hytera XPT hash; not verified on air.
 - **Cap+ site numbers are not globally unique.** Two unrelated Cap+ networks can both say
   `Site: 2`. `explicit_same_site` for Cap+ therefore requires the same colour code and a
   frequency distance below `survey.same_site_max_span_hz` (default 5 MHz), and reaches
@@ -648,16 +703,21 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 - **Carriers without DMR** (analogue, another protocol, too weak) stay in `carriers` with variant
   `unknown`; after 30 s of decoding with no DMR the scheduler leaves them out of a round until they
   are stale.
-- **Capacity Max, from SDRTrunk logs of the same network (2026-10-30).** SDRTrunk decodes what this
-  DSD-FME build does not: `ALOHA LARGE NETWORK:n SITE:m`, `LARGE NEIGHBOR NETWORK:n SITE:m LCN:l`
-  and channel grants with network-wide LCNs (`CHANID = 2 × LCN + slot`). Its numbering is DSD-FME's
-  minus one (SDRTrunk net 1 site 1 = DSD-FME net 2 site 1.2, SYS 2101). Each control channel
-  announced a neighbour site 3 on LCN 5 whose frequency is not known yet. Traffic channels transmit
-  only during calls, so a 3 s survey dwell misses them: Phase 4 watches a whole slice instead.
-- **`SLCO Completed Block [..]`** is the raw 36-bit short LC. Opcode 1 is an Activity Update
-  (`[18][00][70][07][60]` = slot 1 group voice, hash 07); opcodes 2/3 are Tier III control/traffic
-  short LCs; `[F0]...` on Cap Max carriers is the Motorola message DSD-FME misprints as a Cap+ site.
-  Decoding these fields is Phase 4.
+- **Capacity Max, from SDRTrunk logs of the same network (2026-10-30).** SDRTrunk printed
+  `ALOHA LARGE NETWORK:n SITE:m`, `LARGE NEIGHBOR NETWORK:n SITE:m LCN:l` (the standard
+  Adjacent_Site broadcast, whose channel field is an LCN on Capacity Max) and channel updates with
+  LCNs (`CHANID = 2 × LCN + slot`). Its numbering is the raw one (net 1 site 1 = DSD-FME's net 2
+  site 1.2, SYS 2101; see "Tier III numbering" in §6). Each control channel announced a neighbour
+  site 3 (DSD-FME: 1.4) on LCN 5 whose frequency is not known yet; it now appears as an announced
+  site with that LCN. Traffic channels transmit only during calls: `mapper watch` (Phase 4).
+- **`SLCO Completed Block [..]`** is not undecoded content: with `-Z` DSD-FME prints it after
+  *every* short LC it decoded (opcode, 24 data bits, CRC-8, 4 pad bits), right after the decoded
+  line. Since Phase 4 it completes that line's event instead of being stored on its own; old
+  `slco_other` rows holding it are still read by `identity_slco`. Opcode 0xF on a Tier III carrier
+  is a Motorola message DSD-FME prints as a Cap+ site: it is kept as `capmax_slco` with its bits.
+- **Watch sessions and the decode planner.** A traffic channel found by watching is a carrier like
+  any other, and a decode session may still plan 60 s on it while it is silent (it then scores
+  "no DMR" and is revisited rarely). Watching is the way to hear it.
 - **Tier III channel numbering** without `Chan_Freq` needs a band plan (`survey.tier3_bandplans`)
   to convert LPCN to frequency; absent that, LPCN is stored and the link stays at `possible`.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded

@@ -155,24 +155,25 @@ code{{font:12px ui-monospace,monospace;color:var(--fg)}}
 const DATA = {payload};
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
 const edgesOf = id => DATA.edges.filter(e => e.source === id || e.target === id);
-function fmtEv(e) {{ return (e.evidence || []).map(x => '<code>' + x + '</code>').join(' '); }}
+const esc = v => String(v).replace(/[&<>"']/g, c => ({{'&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'}})[c]);
+function fmtEv(e) {{ return (e.evidence || []).map(x => '<code>' + esc(x) + '</code>').join(' '); }}
 function show(id) {{
   const n = byId[id]; if (!n) return;
   document.querySelectorAll('.node').forEach(el => {{ el.classList.toggle('sel', el.dataset.id === id); el.classList.toggle('faded', el.dataset.id !== id && !edgesOf(id).some(e => e.source === el.dataset.id || e.target === el.dataset.id)); }});
   document.querySelectorAll('.edge').forEach(el => {{ const inc = el.dataset.a === id || el.dataset.b === id; el.classList.toggle('hi', inc); el.classList.toggle('faded', !inc); }});
   let h = '<h2>' + (n.kind === 'site' ? 'Announced site' : 'Carrier') + '</h2><table>';
-  const row = (k, v) => '<tr><td>' + k + '</td><td>' + (v === null || v === undefined ? '-' : v) + '</td></tr>';
+  const row = (k, v) => '<tr><td>' + k + '</td><td>' + (v === null || v === undefined ? '-' : esc(v)) + '</td></tr>';
   if (n.kind === 'carrier') {{
     h += row('frequency', n.label + ' MHz') + row('variant', n.variant + ' (' + (n.variant_confidence || 0).toFixed(2) + ')') + row('colour code', n.cc) + row('band', n.band)
        + row('site', n.site_label) + row('LCN', n.lcn) + row('system', n.system_label) + row('first seen', n.first_seen_h) + row('last seen', n.last_seen_h)
        + row('observed', (n.activity ? n.activity.seconds + ' s, ' + n.activity.bursts + ' bursts, ' + n.activity.voice + ' voice' : '-'));
-  }} else {{ h += row('site', n.label) + row('system', n.system_label) + row('status', 'announced by a neighbour; no carrier decoded yet'); }}
+  }} else {{ h += row('site', n.site_label || n.label) + row('system', n.system_label) + row('status', 'announced by a neighbour; no carrier decoded yet'); }}
   h += '</table><h2>Links</h2>';
   const es = edgesOf(id).sort((a, b) => (b.score || 0) - (a.score || 0));
   if (!es.length) h += '<p style="color:var(--muted)">none at this threshold</p>';
   for (const e of es) {{
     const other = byId[e.source === id ? e.target : e.source];
-    h += '<div class="ev"><b>' + (other ? other.label : '?') + '</b> · ' + e.kind + ' · <b>' + e.label + '</b> ' + (e.score || 0).toFixed(2) + (e.tier2_only ? ' · Tier II only' : '') + '<br>' + fmtEv(e)
+    h += '<div class="ev"><b>' + (other ? esc(other.label) : '?') + '</b> · ' + e.kind + ' · <b>' + e.label + '</b> ' + (e.score || 0).toFixed(2) + (e.tier2_only ? ' · Tier II only' : '') + '<br>' + fmtEv(e)
        + (e.also ? '<br><span style="color:var(--muted)">also: ' + e.also.map(a => a.kind + ' ' + a.label + ' ' + a.score.toFixed(2)).join(', ') + '</span>' : '') + '</div>';
   }}
   document.getElementById('detail').innerHTML = h + '<p><a href="#" onclick="reset();return false" style="color:var(--accent)">back to legend</a></p>';
@@ -183,7 +184,7 @@ function renderSystems() {{
   const box = document.getElementById('systems'); if (!box) return;
   box.innerHTML = DATA.systems.map(s => {{
     const members = DATA.nodes.filter(n => n.system_id === s.id && n.kind === 'carrier');
-    return '<div class="sys" onclick="show(\\'' + (members[0] ? members[0].id : '') + '\\')"><b>' + s.label + '</b> <span style="color:var(--muted)">' + s.variant + ' · ' + members.length + ' carrier' + (members.length === 1 ? '' : 's') + '</span></div>';
+    return '<div class="sys" onclick="show(\\'' + (members[0] ? members[0].id : '') + '\\')"><b>' + esc(s.name ? s.name + ' (' + s.label + ')' : s.label) + '</b> <span style="color:var(--muted)">' + s.variant + ' · ' + members.length + ' carrier' + (members.length === 1 ? '' : 's') + '</span></div>';
   }}).join('');
 }}
 document.querySelectorAll('.node').forEach(el => el.addEventListener('click', () => show(el.dataset.id)));

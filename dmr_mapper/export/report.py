@@ -10,6 +10,7 @@ from typing import Any
 
 import networkx as nx
 
+from ..correlate.names import display
 from ..db import Store
 from .graph import LABEL_RANK, build, to_json, write_graphml
 from .html import write
@@ -31,11 +32,11 @@ def systems_report(store: Store, min_label: str = "possible") -> tuple[dict[str,
         return data, "no systems yet: run `mapper correlate` after ingesting"
     out: list[str] = []
     for sy in systems:
-        out.append(f"system {sy['id']}: {sy['label']}  [{sy['variant']}]" + (f"  sys={sy['sys_code']}" if sy["sys_code"] else "")
+        out.append(f"system {sy['id']}: {display(sy['name'], sy['label'])}  [{sy['variant']}]" + (f"  sys={sy['sys_code']}" if sy["sys_code"] else "")
                    + (f"  net={sy['net_id']}" if sy["net_id"] is not None else ""))
         for si in [x for x in sites if x["system_id"] == sy["id"]]:
             flag = "" if si["directly_observed"] else "  (announced only)"
-            out.append(f"  site {si['id']}: {si['label']}{flag}")
+            out.append(f"  site {si['id']}: {display(si['name'], si['label'])}{flag}")
             for m in [x for x in members if x["site_id"] == si["id"]]:
                 lcn = f" LCN {m['lcn']}" if m["lcn"] else ""
                 out.append(f"    {m['freq_hz'] / 1e6:10.4f} MHz  {m['variant']:8s} cc={m['dominant_cc']}{lcn}"

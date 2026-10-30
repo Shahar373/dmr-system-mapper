@@ -64,3 +64,34 @@ async def test_console_without_daemon_says_so(tmp_path, cfg):
         await pilot.pause()
     with Store(tmp_path / "empty.db") as s:
         assert st.recent_commands(s)[0]["kind"] == "correlate"
+
+
+@pytest.mark.asyncio
+async def test_console_watch_status_and_naming(populated, cfg):
+    with Store(populated) as s:
+        st.write_heartbeat(s, os.getpid(), int(time.time()), "watch", 3, {"status": "present", "driver": "sdrplay"},
+                           {"supply_full": False}, {"phase": "watching", "center_hz": 469_400_000, "instances": "2/3", "keyups": 4, "missed": 1,
+                                                    "elapsed_s": 30, "budget_s": 600,
+                                                    "channels": [{"freq_hz": 469_350_000, "state": "pinned", "snr_db": 31.0},
+                                                                 {"freq_hz": 469_062_500, "state": "decoding", "snr_db": 18.5}]}, "msg")
+        sys_id = int(s.scalar("SELECT id FROM systems ORDER BY id LIMIT 1"))
+    app = MapperApp(populated, cfg)
+    async with app.run_test(size=(160, 44)) as pilot:
+        await pilot.pause()
+        text = app.query_one("#status", StatusBar).text
+        assert "watch #3 at 469.4000 MHz" in text and "469.0625" in text and "key-ups 4 (missed 1)" in text, text
+        await pilot.press("w")
+        await pilot.press("n")                      # nothing selected yet: only a hint in the log
+        tree = app.query_one("#systems")
+        node = next(n for n in tree.root.children if n.data == ("system", sys_id))
+        tree.move_cursor(node)
+        await pilot.pause()
+        assert app._selected == ("system", sys_id)
+        await pilot.press("n")
+        assert app.focused is app.query_one("#name")
+        await pilot.press(*"Base", "enter")
+        await pilot.pause()
+        assert str(tree.root.children[0].label).startswith("Base (")
+    with Store(populated) as s:
+        assert [c["kind"] for c in st.recent_commands(s)][:1] == ["start_watch"]
+        assert s.scalar("SELECT name FROM systems WHERE id = ?", (sys_id,)) == "Base"

@@ -46,8 +46,9 @@ device directly, the mapper stays away from it and asks for gpsd, which shares o
 ## 2. Daily use
 
 ```sh
-mapper tui                        # the console: s survey, d decode, x stop, c correlate, e export, q quit
+mapper tui                        # the console: a survey+decode, s survey, d decode, w watch, x stop, c correlate, e export, n name, q quit
 mapper status                     # one-shot summary
+mapper watch --minutes 20         # Capacity Max: one slice, the control channel and every traffic channel that keys up
 journalctl -u dmr-mapper -f       # what the daemon is doing (sessions, refusals, receiver, power)
 systemctl list-timers dmr-mapper-snapshot.timer
 mapper doctor                     # everything at once, including the service and the timer

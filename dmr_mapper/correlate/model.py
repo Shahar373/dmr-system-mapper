@@ -18,6 +18,7 @@ EVIDENCE_CLASS: dict[str, str] = {
     "explicit_same_system_contradiction": "explicit",
     "behavioral_rest_hop": "behavioral",
     "behavioral_lsn_table": "behavioral",
+    "behavioral_lcn_keyup": "behavioral",
     "identity_radio": "identity",
     "identity_talkgroup": "identity",
     "identity_slco": "identity",

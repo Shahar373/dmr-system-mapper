@@ -62,6 +62,12 @@ class DecoderProcess:
     def alive(self) -> bool:
         return self.proc is not None and self.proc.poll() is None
 
+    def stop_async(self) -> threading.Thread:
+        """Stop in the background: the session thread must keep reading the receiver."""
+        th = threading.Thread(target=self.stop, name=f"dsd-stop-{self.freq_hz}", daemon=True)
+        th.start()
+        return th
+
     def stop(self, grace_s: float = 3.0) -> None:
         if self.proc is None:
             return

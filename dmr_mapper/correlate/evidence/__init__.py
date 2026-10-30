@@ -7,7 +7,7 @@ from typing import Callable
 from ..context import Context
 from ..model import Evidence
 from ..scoring import ScoringConfig
-from . import behavioral, explicit, identity, rf
+from . import behavioral, capmax, explicit, identity, rf
 
 Collector = Callable[[Context, ScoringConfig], list[Evidence]]
 
@@ -18,6 +18,7 @@ COLLECTORS: dict[str, Collector] = {
     "explicit_lcn_freq": explicit.lcn_freq,
     "behavioral_rest_hop": behavioral.rest_hop,
     "behavioral_lsn_table": behavioral.lsn_table,
+    "behavioral_lcn_keyup": capmax.lcn_keyup,
     "identity_radio": identity.radio,
     "identity_talkgroup": identity.talkgroup,
     "identity_slco": identity.slco_pattern,

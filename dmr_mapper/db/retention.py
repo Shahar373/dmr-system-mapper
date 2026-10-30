@@ -3,7 +3,8 @@
 Radio IDs and talkgroups, and the structural events that carry them (calls, preambles, data
 headers, IP maps, LRRP reports, grants), are deleted once they are older than that. Site, system
 and neighbour announcements, observations, links and evidence stay: they describe networks, not
-people. The receiver's own GPS track is kept unless ``retention.track_days`` is set.
+people. The receiver's own GPS track is kept unless ``retention.track_days`` is set; watch key-ups
+for ``retention.keyup_days`` (180).
 """
 
 from __future__ import annotations
@@ -13,7 +14,8 @@ from typing import Any
 
 from .store import Store
 
-IDENTITY_EVENT_KINDS = ("call", "preamble", "data_header", "ip_map", "lrrp", "data_response", "grant")
+IDENTITY_EVENT_KINDS = ("call", "preamble", "data_header", "ip_map", "lrrp", "data_response", "grant",
+                        "capmax_channel_update", "capmax_activity")
 
 
 def prune(store: Store, cfg: dict[str, Any], now: int | None = None) -> dict[str, int]:
@@ -31,6 +33,10 @@ def prune(store: Store, cfg: dict[str, Any], now: int | None = None) -> dict[str
         q = ",".join("?" for _ in IDENTITY_EVENT_KINDS)
         cur = store.conn.execute(f"DELETE FROM csbk_events WHERE kind IN ({q}) AND last_ts < ?", (*IDENTITY_EVENT_KINDS, cutoff))
         out["identity_events"] = cur.rowcount
+    keyup = int(r.get("keyup_days", 180) or 0)
+    if keyup > 0:
+        cur = store.conn.execute("DELETE FROM keyups WHERE start < ?", (now - keyup * 86400,))
+        out["keyups"] = cur.rowcount
     track = int(r.get("track_days", 0) or 0)
     if track > 0:
         cur = store.conn.execute("DELETE FROM positions WHERE ts < ?", (now - track * 86400,))

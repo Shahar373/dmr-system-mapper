@@ -37,6 +37,7 @@ from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
 from .survey import latest_hits, record, sweep
+from .watch import InstancePlanner, KeyupDetector, plan_watch, watch_cfg, watch_instances
 
 
 log = logging.getLogger("dmr_mapper.daemon")
@@ -225,14 +226,14 @@ class Daemon:
     def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str] | None:
         assert self._store is not None
         kind, params = cmd["kind"], cmd.get("params") or {}
-        if kind in ("start_survey", "start_decode"):
+        if kind in ("start_survey", "start_decode", "start_watch"):
             if self.session_thread is not None and self.session_thread.is_alive() and self._closing.is_set():
                 # the previous session is only writing its summary (the one-button flow queues the
                 # decode from there): wait for it instead of refusing
                 self.session_thread.join(timeout=30)
             if self.session_thread is not None and self.session_thread.is_alive():
                 return False, f"a {self.session_kind} session is already running (#{self.session_id}); stop it first"
-            if kind == "start_decode" and find_dsd_fme(self.cfg) is None:
+            if kind in ("start_decode", "start_watch") and find_dsd_fme(self.cfg) is None:
                 return False, "dsd-fme not found (decode.dsd_fme_bin)"
             self.sdr = self._probe()
             self._last_probe = self._last_full_probe = time.monotonic()
@@ -249,7 +250,15 @@ class Daemon:
             self.power = read_power(self.cfg)
             instances, default_budget = budget_for(self.power, self.cfg)
             budget = int(params.get("budget_s") or default_budget)
-            session_kind = "survey" if kind == "start_survey" else "decode"
+            session_kind = kind.removeprefix("start_")
+            if session_kind == "watch":
+                instances = watch_instances(self.power, self.cfg)
+                try:      # nothing to watch is a refusal, like a busy receiver, not a failed session
+                    plan_watch(self._store, self.cfg, source.sample_rate, int(params.get("max_instances") or instances),
+                               center_hz=params.get("center_hz"), freqs=params.get("freqs"))
+                except ValueError as exc:
+                    source.close()
+                    return False, str(exc)
             params = dict(params)
             params.setdefault("max_instances", instances)
             sid = st.create_session(self._store, session_kind, str(cmd.get("source", "?")), params, budget)
@@ -323,6 +332,8 @@ class Daemon:
             summary["source"] = source.describe()
             if kind == "survey":
                 self._survey(store, source, params, budget_s, t0, summary)
+            elif kind == "watch":
+                self._watch(store, source, params, budget_s, t0, summary, sid)
             else:
                 self._decode(store, source, params, budget_s, t0, summary)
         except BudgetDone:
@@ -395,7 +406,7 @@ class Daemon:
         pruned = {k: v for k, v in prune(store, self.cfg).items() if v}
         if pruned:
             summary["pruned"] = pruned
-        if kind == "decode" and dcfg.get("correlate_after_decode", True):
+        if kind in ("decode", "watch") and dcfg.get("correlate_after_decode", True):
             from ..correlate import run as correlate
             rep = correlate(store, self.cfg)
             summary["correlate"] = {"links": rep.links_scored, "by_label": rep.links_by_label, "sites": rep.sites, "systems": rep.systems}
@@ -548,6 +559,147 @@ class Daemon:
                 r["level_db"] = round(chan.channels[f].level_db, 1) if f in chan.channels else None
                 result.setdefault(f, {}).update(r)
         return result
+
+    # -- watch -------------------------------------------------------------------------------------
+    def _watch(self, store: Store, source: Any, params: dict[str, Any], budget_s: int, t0: float, summary: dict[str, Any],
+               sid: int) -> None:
+        """One slice for the whole session: pinned control channel(s), a DSD-FME for every channel
+        that keys up (see watch.py), every key-up recorded."""
+        from collections import deque
+
+        from ..ingest.runner import _band_for
+
+        dcfg = self.cfg.get("decode", {}) or {}
+        w = watch_cfg(self.cfg)
+        limit = int(params.get("max_instances") or 1)
+        plan = plan_watch(store, self.cfg, source.sample_rate, limit, center_hz=params.get("center_hz"), freqs=params.get("freqs"))
+        summary["plan"] = plan.to_dict()
+        summary["instances"] = limit
+        source.tune(plan.center_hz)
+        chan = Channelizer(source.sample_rate, source.center_hz)
+        block_s = chan.hop / source.sample_rate
+        history: "deque[tuple[np.ndarray, int]]" = deque(maxlen=max(1, int(round(float(w["preroll_s"]) / block_s)) + 1))
+        detector = KeyupDetector(plan.channels, float(w["keyup_snr_db"]), float(w["keydown_snr_db"]), float(w["hang_s"]))
+        planner = InstancePlanner(plan.pinned, limit, float(w["max_hold_s"]))
+        base_port = int(dcfg.get("tcp_base_port", 7355))
+        # twice as many ports as decoders, used in turn: a port is not reused while the DSD-FME
+        # that was just stopped on it may still be closing
+        free_ports = deque(base_port + i for i in range(2 * limit))
+        lines: "queue.Queue[tuple[int, str | None]]" = queue.Queue()
+        servers: dict[int, PcmServer] = {}
+        decoders: dict[int, DecoderProcess] = {}
+        ingests: dict[int, CarrierIngest] = {}
+        stopping: list[threading.Thread] = []
+        decoded_now: set[int] = set()            # channels whose current key-up had a decoder at some point
+        per: dict[str, dict[str, Any]] = {}
+        totals = {"keyups": 0, "decoded": 0, "missed": 0, "blips": 0, "preempted": 0}
+        backlog = int(AUDIO_RATE * 2 * (float(w["preroll_s"]) + 3.0))   # pre-roll + DSD-FME start-up, int16
+
+        def stop_decoder(f: int) -> None:
+            d = decoders.pop(f, None)
+            if d is not None:
+                stopping.append(d.stop_async())
+            srv = servers.pop(f, None)
+            if srv is not None:
+                free_ports.append(srv.port)
+                srv.close()
+            chan.remove_channel(f)
+
+        def start_decoder(f: int) -> None:
+            port = free_ports.popleft()
+            srv = PcmServer(port, backlog_bytes=backlog)
+            servers[f] = srv
+            if f not in ingests:
+                ingests[f] = CarrierIngest(store, self.cfg, f)
+            decoders[f] = DecoderProcess(self.cfg, f, port, lines)
+            decoders[f].start()
+            chan.add_channel(f)
+            for Xh, n0h in history:                  # the moments before the key-up, oldest first
+                pcm = chan.extract(Xh, n0h, only=[f]).get(f)
+                if pcm is not None:
+                    srv.write(pcm)
+
+        def record_keyup(k: Any, decoded: bool) -> None:
+            if k.duration < float(w["min_keyup_s"]) and k.freq_hz not in plan.pinned:
+                totals["blips"] += 1
+                return
+            stats = per.setdefault(str(k.freq_hz), {"keyups": 0, "airtime_s": 0.0, "decoded": 0})
+            cid = store.upsert_carrier(k.freq_hz, int(k.start), _band_for(self.cfg, k.freq_hz))
+            store.upsert_carrier_seen(cid, int(k.start), int(k.end))
+            store.conn.execute("INSERT INTO keyups (carrier_id, session_id, start, end, peak_snr_db, decoded) VALUES (?, ?, ?, ?, ?, ?)",
+                               (cid, sid, round(k.start, 2), round(k.end, 2), k.peak_snr_db, int(decoded)))
+            stats["keyups"] += 1
+            stats["airtime_s"] = round(stats["airtime_s"] + k.duration, 1)
+            stats["decoded"] += int(decoded)
+            totals["keyups"] += 1
+            totals["decoded" if decoded else "missed"] += 1
+
+        wall0 = time.time()
+        samples = 0
+        last_flush = last_progress = time.monotonic()
+        try:
+            source.read(int(source.sample_rate * 0.1))   # settle after retune
+            while True:
+                self._check(t0, budget_s)
+                block = source.read(chan.hop)
+                samples += len(block)
+                t = wall0 + samples / source.sample_rate     # source time: what the receiver heard when
+                X, n0 = chan.transform(block)
+                history.append((X, n0))
+                started, ended = detector.update(t, chan.channel_power(X, plan.channels, float(w["channel_width_hz"])))
+                for k in ended:
+                    record_keyup(k, k.freq_hz in decoded_now or k.freq_hz in servers)
+                    decoded_now.discard(k.freq_hz)
+                to_start, to_stop = planner.plan(t, detector.active())
+                totals["preempted"] += sum(1 for f in to_stop if f in detector.active())
+                for f in to_stop:
+                    stop_decoder(f)
+                for f in to_start:
+                    start_decoder(f)
+                    decoded_now.add(f)
+                fresh = set(to_start)
+                audio = chan.extract(X, n0, only=[f for f in servers if f not in fresh])
+                for f, pcm in audio.items():
+                    servers[f].write(pcm)
+                self._drain(lines, ingests)
+                if store.conn.in_transaction:
+                    store.commit()
+                now = time.monotonic()
+                if now - last_flush >= 60:
+                    for ing in ingests.values():
+                        ing.flush_partial()
+                    store.commit()
+                    self._session_track += self._flush_track(store, self.session_id or 0)
+                    last_flush = now
+                if now - last_progress >= 1:
+                    active = detector.active()
+                    chans = [{"freq_hz": f, "snr_db": detector.snr_of(f),
+                              "state": "pinned" if f in plan.pinned else ("decoding" if f in servers else "waiting"),
+                              "syncs": ingests[f].pos_syncs if f in ingests else 0}
+                             for f in sorted(set(active) | set(plan.pinned))]
+                    self._set_progress(phase="watching", center_hz=plan.center_hz, span_hz=plan.to_dict()["span_hz"], channels=chans,
+                                       instances=f"{len(servers)}/{limit}", elapsed_s=int(now - t0), budget_s=budget_s,
+                                       **totals, **self._gps_progress())
+                    last_progress = now
+        finally:
+            for k in detector.close():
+                record_keyup(k, k.freq_hz in decoded_now or k.freq_hz in servers)
+            for f in list(decoders):
+                d = decoders.pop(f)
+                d.stop()
+            for th in stopping:
+                th.join(timeout=5)
+            self._drain(lines, ingests, final=True)
+            for srv in servers.values():
+                srv.close()
+            for f, ing in ingests.items():
+                ing.finish()
+                r = ing.summary()
+                per.setdefault(str(f), {"keyups": 0, "airtime_s": 0.0, "decoded": 0}).update(
+                    {k: r[k] for k in ("lines", "syncs", "structural", "variant", "identities")})
+            store.commit()
+            summary["watch"] = totals
+            summary["carriers"] = per
 
     @staticmethod
     def _drain(lines: "queue.Queue[tuple[int, str | None]]", ingests: dict[int, CarrierIngest], final: bool = False) -> None:

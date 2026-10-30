@@ -111,16 +111,47 @@ class Channelizer:
 
     def process(self, block: np.ndarray) -> dict[float, np.ndarray]:
         """``block`` has exactly ``hop`` samples. Returns int16 48 kHz audio per channel."""
+        X, n0 = self.transform(block)
+        return self.extract(X, n0)
+
+    def transform(self, block: np.ndarray) -> tuple[np.ndarray, int]:
+        """The FFT of one block (plus the overlap) and the absolute index of its first sample. A
+        slice watcher keeps the last few of these to start a channel from before its key-up."""
         if len(block) != self.hop:
             raise ValueError(f"expected {self.hop} samples, got {len(block)}")
         x = np.concatenate([self._hist, block])
         self._hist = block[-self.overlap:].copy()
         X = sfft.fft(x, workers=1)
-        out: dict[float, np.ndarray] = {}
-        discard = self.overlap // self.D
         n0 = self._n0
         self._n0 += self.hop
-        for f, st in self.channels.items():
+        return X, n0
+
+    def add_channel(self, freq: float) -> ChannelState:
+        self.set_channels(list(self.channels) + ([freq] if freq not in self.channels else []))
+        return self.channels[freq]
+
+    def remove_channel(self, freq: float) -> None:
+        self.channels.pop(freq, None)
+
+    def channel_power(self, X: np.ndarray, freqs: list[float] | np.ndarray, width_hz: float = 10_000.0) -> np.ndarray:
+        """Mean power per bin within ±width/2 of each frequency (same units for every channel, so
+        ratios between channels are SNRs). One cumulative sum over the block's spectrum."""
+        P = np.abs(np.fft.fftshift(X)) ** 2
+        C = np.concatenate([[0.0], np.cumsum(P, dtype=np.float64)])
+        off = (np.asarray(freqs, dtype=np.float64) - self.center_hz) / self._bin_hz + self.N // 2
+        half = width_hz / 2 / self._bin_hz
+        lo = np.clip(np.round(off - half).astype(np.int64), 0, self.N)
+        hi = np.clip(np.round(off + half).astype(np.int64), 0, self.N)
+        n = np.maximum(hi - lo, 1)
+        return (C[hi] - C[lo]) / n
+
+    def extract(self, X: np.ndarray, n0: int, only: list[float] | None = None) -> dict[float, np.ndarray]:
+        """Audio of the channels (all, or ``only``) for one transformed block. Blocks must reach a
+        channel in order: its filters and discriminator carry state from one block to the next."""
+        out: dict[float, np.ndarray] = {}
+        discard = self.overlap // self.D
+        chans = self.channels if only is None else {f: self.channels[f] for f in only if f in self.channels}
+        for f, st in chans.items():
             idx = (st.bin_center + np.arange(-self.M // 2, self.M // 2)) % self.N
             slice_ = X[idx]
             slice_ = np.roll(slice_, self.M // 2) * self._taper          # bins ordered as fftfreq

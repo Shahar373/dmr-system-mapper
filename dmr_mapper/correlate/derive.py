@@ -8,7 +8,9 @@
   with ``directly_observed = 0`` and no carriers, so the graph can show them as hollow nodes.
 
 Tables ``systems``/``sites``/``carrier_sites`` are rebuilt on every run. Manual knowledge lives in
-``evidence`` rows with ``source = 'manual'`` (see ``engine.propose``), never in these tables.
+``evidence`` rows with ``source = 'manual'`` (see ``engine.propose``) and in ``names`` (see
+``names.py``: each system and site carries an ``anchor``, its on-air identity, that names follow),
+never in these tables.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ import networkx as nx
 
 from ..db import Store
 from .context import CarrierInfo, Context, format_site
+from .names import apply_names, site_anchor, system_anchor
 from .scoring import ScoringConfig
 
 
@@ -73,9 +76,12 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
         variant, sys_code, net_id = _system_identity(ctx, carriers_in_sys)
         label = _system_label(ctx, carriers_in_sys, variant, sys_code, net_id)
         confidence = _component_confidence(links, carriers_in_sys)
+        models = {ctx.t3_model(ctx.carriers[c]) for c in carriers_in_sys} - {None} if variant == "tier3" else set()
+        sys_anchor = system_anchor(variant, net_id, "/".join(sorted(models)) or None)
         cur = store.conn.execute(
-            "INSERT INTO systems (label, variant, sys_code, net_id, confidence, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, 'auto', ?, ?)",
-            (label, variant, sys_code, net_id, confidence, now, now))
+            "INSERT INTO systems (label, variant, sys_code, net_id, confidence, created_by, created_at, updated_at, anchor)"
+            " VALUES (?, ?, ?, ?, ?, 'auto', ?, ?, ?)",
+            (label, variant, sys_code, net_id, confidence, now, now, sys_anchor))
         sys_id = int(cur.lastrowid)
         announced: set[Any] = set()
         for s in sites:
@@ -89,10 +95,10 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
             # row's id on both the insert and the update path; cursor.lastrowid does not (it keeps
             # the id of the previous insert when the conflict branch runs).
             row = store.conn.execute(
-                "INSERT INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen) VALUES (?, ?, ?, ?, 1, ?, ?)"
+                "INSERT INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen, anchor) VALUES (?, ?, ?, ?, 1, ?, ?, ?)"
                 " ON CONFLICT(system_id, site_number) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = MIN(first_seen, excluded.first_seen)"
                 " RETURNING id",
-                (sys_id, site_number, site_label, cc, first, last)).fetchone()
+                (sys_id, site_number, site_label, cc, first, last, site_anchor(sys_anchor, variant, site_number))).fetchone()
             site_id = int(row[0])
             site_db_ids[s] = site_id
             comp_conf = _component_confidence(links, members) if len(members) > 1 else 1.0
@@ -109,10 +115,15 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
             number = k[2] if isinstance(k, tuple) else k
             if number in known_numbers or ctx.carriers_for_site(v, k):
                 continue
+            label = f"site {format_site(number) if v == 'tier3' else number}"
+            if v == "tier3" and (lcn := ctx.announced_channel(k[1], number)) is not None:
+                label += f" (control channel on LCN {lcn}, frequency not heard yet)"
             store.conn.execute(
-                "INSERT OR IGNORE INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen) VALUES (?, ?, ?, NULL, 0, ?, ?)",
-                (sys_id, number, f"site {format_site(number) if v == 'tier3' else number}", now, now))
+                "INSERT OR IGNORE INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen, anchor)"
+                " VALUES (?, ?, ?, NULL, 0, ?, ?, ?)",
+                (sys_id, number, label, now, now, site_anchor(sys_anchor, v, number)))
             known_numbers.add(number)
+    apply_names(store)
     return int(store.scalar("SELECT COUNT(*) FROM sites")), len(system_members)
 
 

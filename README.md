@@ -21,14 +21,16 @@ stands alone.
  │   command queue ◄── mapper tui (SSH) · mapper survey/decode (CLI) · MCP  │
  │   session with a time budget, only when asked:                           │
  │     survey: step the band, PSD per step ──► survey_hits                  │
- │     decode: plan slices ──► 2.4 MS/s ──► FFT channelizer ──► dsd-fme ×N  │
+ │     decode: plan slices ──► 2 MS/s ──► FFT channelizer ──► dsd-fme ×N    │
  │             48 kHz PCM / TCP │ stderr ──► one writer ──► SQLite          │
+ │     watch:  one slice, power of every channel per 0.1 s ──► key-ups;     │
+ │             dsd-fme on the control channel + each channel that keys up   │
  │   checks before each session: receiver present and free, power state    │
  │   after a decode session: correlator ──► links + score + evidence        │
  └───────────────────────────────┬──────────────────────────────────────────┘
                                  │ Tailscale              nightly snapshot of the DB
                                  ▼                                   ▼
-          SSH terminal (mapper tui), Claude Code (MCP, Phase 4)   archive Pi
+          SSH terminal (mapper tui), Claude Code (MCP, Phase 5)   archive Pi
 ```
 
 Deterministic code does all decoding (DSD-FME) and correlation. Claude's role through MCP is
@@ -58,14 +60,14 @@ investigation only.
 | 3a | `mapper daemon` / `tui` / `survey` / `decode` / `doctor`: on-demand sessions with a time budget, band survey, FFT channelizer, DSD-FME decode, single-writer live ingest, Textual console | done |
 | 3b | Deployment: `dmr-mapper` systemd service, `deploy/deploy.sh` (pull, install, restart), nightly snapshot + export timer, read-only archive pull, size-capped raw debug logs, `mapper snapshot` / `export --all` | done (first install on the Pi pending) |
 | 3c | GPS track and position of every survey hit (gpsd, or the device when nobody else has it open), one-button survey+decode (`a`), radios' LRRP positions no longer kept, radio IDs and talkgroups kept 90 days (`mapper prune`) | done |
-| 4 | Capacity Max in depth: watch a whole slice and decode traffic channels when they key up, Cap Max neighbour/LCN messages, activity updates from `SLCO Completed Block`, names you give to systems | planned |
+| 4 | Capacity Max in depth: `mapper watch` (a whole slice, DSD-FME on the control channel and on every traffic channel when it keys up, with pre-roll), Cap Max channel updates and neighbour LCNs from DSD-FME's raw bytes, LCN learning, Activity Updates from `SLCO Completed Block`, one Tier III numbering whatever DSD-FME prints, `mapper name` for systems and sites | done (parsers untested on air until a raw log of the 469 MHz network is in `samples/`) |
 | 5 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet; Claude may look and propose, scans only with your approval | planned |
 
 Each phase ends with a commit to `main` and waits for approval.
 
 ## Requirements
 
-- Python 3.11+, SQLite (stdlib), `pyyaml`, `networkx`; `mcp` for Phase 4.
+- Python 3.11+, SQLite (stdlib), `pyyaml`, `networkx`; `mcp` for Phase 5.
 - Collector and console: `numpy`, `scipy`, `textual` (`pip install -e '.[collector,tui]'`).
 - On the Pi: `dsd-fme` (build `AW 2026-26` or newer), SoapySDR with SoapySDRPlay3 and its Python
   bindings. `mapper doctor` checks all of these.
@@ -140,7 +142,7 @@ processes it can afford (fewer on battery).
 ```sh
 mapper doctor                      # what is installed, is the receiver there, power, database
 mapper daemon                      # foreground; systemd runs this in Phase 3b
-mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · x stop · c correlate · e export · q quit
+mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
 mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: plan from the latest survey
@@ -163,6 +165,43 @@ site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double
 produces rest-hop evidence. After a decode session the correlator runs. Closing the console never
 stops a session. Development without hardware uses `sdr.source: file` (replay of an IQ recording)
 or the synthetic receiver in the tests.
+
+## Usage (Phase 4)
+
+A Capacity Max traffic channel transmits only during a call, so a survey dwell misses it and a
+decode slice listens to silence. A watch session tunes once and listens to the whole slice:
+
+```sh
+mapper watch --minutes 20                    # the Tier III network with the most carriers in one slice
+mapper watch 469.35 469.65 --minutes 20      # a slice holding these carriers (Hz or MHz)
+mapper watch --center 469400000              # or simply here
+mapper tui                                   # w: watch, n: name the system/site selected on the Systems tab
+```
+
+Every 0.1 s the power of every 12.5 kHz channel in the slice is measured from the channelizer's
+FFT. The control channel keeps one DSD-FME for the whole session; a channel that keys up gets one
+at once, fed first with the half second before the key-up (rebuilt from kept FFT blocks) so the
+call header is not lost, and loses it 2 s after the key-down. At most `watch.max_instances` (6)
+run at once on mains, `power.battery_watch_instances` (3) on battery, the control channels taking
+at most half. Every key-up is stored (`keyups`), and a carrier nobody knew about is added. After
+the session the correlator runs.
+
+What the control channel says that DSD-FME does not print is read from the bytes it prints with
+`-Z` (`DMR PDU Payload`, `SLCO Completed Block`): Capacity Max channel updates (talkgroup T on LCN
+L, timeslot s), the LCN of a neighbour site's control channel when DSD-FME leaves it out, and the
+content of short LCs it misnames. Lining up channel updates with the calls and key-ups of the
+carriers in the slice gives each traffic channel its LCN (`behavioral_lcn_keyup`); a neighbour
+site never heard shows as an announced site with its control channel's LCN.
+
+Names survive correlator runs (they follow the on-air identity, e.g. Tier III net 2, or the
+carriers when there is none) and show in `mapper systems`, the map and the console:
+
+```sh
+mapper name system 469.35 North network     # the system holding that carrier (or its id from mapper systems)
+mapper name site 469650000 Hilltop
+mapper name site 469650000 --clear
+mapper names
+```
 
 ## Samples (`samples/`)
 
@@ -187,9 +226,12 @@ Things to know about the surveyor samples:
   `C0013/20260713_150256/iq/discriminator.wav`, kept as an optional DSD-FME regression input.
   The repository history still contains the removed blobs.
 
-No Connect Plus, Tier III or Hytera XPT capture exists in the samples yet. Those parsers are
-written from the DSD-FME source formats and tested on synthetic lines; a real capture of each,
-named per CAPTURE.md, is the most useful thing to add to `samples/`.
+No Connect Plus, Tier III, Capacity Max or Hytera XPT capture exists in the samples yet. Those
+parsers are written from the DSD-FME source formats (and SDRTrunk's bit layouts for the Motorola
+messages) and tested on synthetic lines; a real capture of each, named per CAPTURE.md, is the most
+useful thing to add to `samples/`. For the 469 MHz Capacity Max network: set
+`decode.keep_raw_logs: true`, run `mapper decode 469350000 469650000 --minutes 5`, and copy the
+files from `var/raw/`.
 
 ## Licences of the reference projects
 

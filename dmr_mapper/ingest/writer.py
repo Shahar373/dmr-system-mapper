@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ..db import Store, canonical_json
-from .events import UNTESTED_ON_AIR, Burst, Event, Meta, NoSync, Quality, Structural, Unrecognized
+from .events import UNTESTED_ON_AIR, Burst, Event, Meta, NoSync, Quality, RawOpcode, Structural, Unrecognized
 
 _DIGITS = re.compile(r"\d+")
 
@@ -20,8 +20,10 @@ _DEDUP_WINDOW: dict[str, int | None] = {
     "capplus_rest_change": 3600,
     "preamble": 3600, "data_header": 3600, "grant": 3600, "ip_map": 3600, "data_response": 3600, "lrrp": 3600,
     "activity_update": 3600, "protected_lc": 3600,
-    "moto_data_channel": 86400, "slco_other": 86400, "unknown_csbk": 86400,
-    "call": 60,
+    "moto_data_channel": 86400, "slco_other": 86400, "unknown_csbk": 86400, "capmax_slco": 86400,
+    "capmax_activity": 3600,
+    # per minute, like calls: the correlator matches them with key-ups and calls on other carriers
+    "call": 60, "capmax_channel_update": 60,
 }
 
 
@@ -50,6 +52,7 @@ class IngestStats:
     rest_transitions: int = 0
     identities: Counter = field(default_factory=Counter)    # kind -> distinct values
     unrecognized: dict[str, tuple[int, str]] = field(default_factory=dict)
+    csbk_opcodes: Counter = field(default_factory=Counter)  # "FID 10 opcode 21" -> raw CSBKs seen (-Z)
     meta: dict[str, str] = field(default_factory=dict)
     variant: str = "unknown"
     variant_confidence: float = 0.0
@@ -69,6 +72,7 @@ class IngestStats:
             "structural": dict(self.structural), "stored_events": dict(self.stored_events), "quality": dict(self.quality),
             "no_sync": self.no_sync, "rest_transitions": self.rest_transitions, "identities": dict(self.identities),
             "unrecognized": {k: {"count": c, "example": e} for k, (c, e) in self.unrecognized.items()},
+            "csbk_opcodes": dict(self.csbk_opcodes),
             "meta": self.meta, "variant": self.variant, "variant_confidence": self.variant_confidence,
             "untested_on_air": self.untested_kinds, "skipped": self.skipped, "note": self.note,
         }
@@ -143,6 +147,10 @@ class Aggregator:
             payload = {k: payload.get(k) for k in ("src", "tgt", "direction")}
         if ev.kind == "call":
             payload = {k: payload.get(k) for k in ("slot", "src", "tgt", "group")}
+        if ev.kind == "capmax_slco":
+            payload = {"data": payload.get("data")}
+        if ev.kind == "tier3_sys_parms":
+            payload.pop("csc", None)     # the common slot counter changes every frame: not a new announcement
         body = canonical_json(payload)
         if window is None:
             return body
@@ -184,6 +192,15 @@ class Aggregator:
             return
         if isinstance(ev, Meta):
             st.meta.setdefault(ev.key, ev.value)
+            return
+        if isinstance(ev, RawOpcode):
+            st.csbk_opcodes[ev.key] += 1
+            if not ev.understood:
+                # a message nobody decodes yet: report it once per opcode with an example
+                pat = f"raw CSBK {ev.key} (not decoded)"
+                cnt, ex = st.unrecognized.get(pat, (0, f"{pat}: {ev.example}"))
+                st.unrecognized[pat] = (cnt + 1, ex)
+                st.unrecognized_total += 1
             return
         if isinstance(ev, Unrecognized):
             pat = pattern_of(ev.text)

@@ -15,6 +15,7 @@ CSBK_KINDS = {"CSBK", "MBC"}
 UNTESTED_ON_AIR = {
     "conplus_sys", "conplus_adjacent", "tier3_sys_parms", "tier3_bcast", "xpt_site_status",
     "xpt_adjacent", "xpt_slco", "capplus_rest_change",
+    "capmax_channel_update", "capmax_activity", "capmax_slco",
 }
 
 
@@ -76,9 +77,20 @@ class Meta:
 
 
 @dataclass(slots=True)
+class RawOpcode:
+    """A CSBK read from its raw bytes (``DMR PDU Payload``, with -Z): which FID/opcode, and whether
+    anything (DSD-FME's text or our own decoder) understood it."""
+
+    ts: int | None
+    key: str               # "FID 10 opcode 21"
+    understood: bool
+    example: str           # the bytes, only when not understood
+
+
+@dataclass(slots=True)
 class Unrecognized:
     ts: int | None
     text: str
 
 
-Event = Burst | NoSync | Structural | Quality | Meta | Unrecognized
+Event = Burst | NoSync | Structural | Quality | Meta | RawOpcode | Unrecognized

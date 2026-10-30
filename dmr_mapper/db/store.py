@@ -328,7 +328,7 @@ class Store:
 _VARIANT_MARKERS: dict[str, tuple[str, ...]] = {
     "capplus": ("capplus_channel_status", "capplus_site", "capplus_adjacent", "capplus_rest_change"),
     "conplus": ("conplus_sys", "conplus_adjacent"),
-    "tier3": ("tier3_sys_parms", "tier3_bcast"),
+    "tier3": ("tier3_sys_parms", "tier3_bcast", "capmax_channel_update", "capmax_slco", "capmax_activity"),
     "xpt": ("xpt_site_status", "xpt_adjacent", "xpt_slco"),
 }
 

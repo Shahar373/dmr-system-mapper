@@ -23,9 +23,11 @@ class CarrierInfo:
     con_sites: dict[tuple[int, int], int] = field(default_factory=dict)   # (net, site) → count (Con+)
     t3_sites: dict[tuple[str | None, int | None, int], int] = field(default_factory=dict)  # (sys, net, site) → count; site see t3_site_number
     t3_models: dict[str, int] = field(default_factory=dict)        # Tier III network model (Tiny/Small/Large/Huge) → count
+    t3_control: int = 0                                            # Tier III announcements only a control channel makes
     xpt_sites: set[int] = field(default_factory=set)
     neighbors: dict[str, set[Any]] = field(default_factory=lambda: defaultdict(set))   # variant → announced site keys
     announced_freqs: dict[int, dict[str, Any]] = field(default_factory=dict)  # freq_hz → {lpcn, sys, net, site}
+    neighbor_channels: dict[tuple[int | None, int], int] = field(default_factory=dict)  # (net, site) → its control channel's LPCN/LCN
     last_seen_structural: int = 0
 
     @property
@@ -98,9 +100,14 @@ class Context:
                 c.t3_sites[key] = c.t3_sites.get(key, 0) + n
                 if p.get("model"):
                     c.t3_models[str(p["model"])] = c.t3_models.get(str(p["model"]), 0) + n
+                if p.get("source") in ("c_aloha_sys_parms", "slc_c_sys_parms"):
+                    c.t3_control += n
             elif kind == "tier3_bcast":
                 if p.get("a_type") == "adjacent_site" and p.get("adj_site_id") is not None:
-                    c.neighbors["tier3"].add((p.get("sys_code"), p.get("adj_net_id"), t3_site_number(p["adj_site_id"], p.get("adj_sub_site"))))
+                    number = t3_site_number(p["adj_site_id"], p.get("adj_sub_site"))
+                    c.neighbors["tier3"].add((p.get("sys_code"), p.get("adj_net_id"), number))
+                    if p.get("lpcn"):
+                        c.neighbor_channels[(p.get("adj_net_id"), number)] = int(p["lpcn"])
                 if p.get("a_type") == "chan_freq" and p.get("rx_freq_hz"):
                     c.announced_freqs[int(p["rx_freq_hz"])] = {"lpcn": p.get("apcn") or p.get("lpcn"), "sys": p.get("sys_code")}
             elif kind == "xpt_adjacent":
@@ -136,6 +143,14 @@ class Context:
         net, site = max(by_site, key=by_site.get)
         codes = sys_for.get((net, site))
         return (max(codes, key=codes.get) if codes else None, net, site)
+
+    def announced_channel(self, net: int | None, site: int) -> int | None:
+        """The LPCN (on Capacity Max: the LCN) neighbours announce for a site's control channel."""
+        for c in self.carriers.values():
+            for (n, s), lcn in c.neighbor_channels.items():
+                if s == site and (n is None or net is None or n == net):
+                    return lcn
+        return None
 
     def primary_cap_site(self, c: CarrierInfo) -> int | None:
         if not c.cap_sites:

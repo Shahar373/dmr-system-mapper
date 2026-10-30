@@ -136,6 +136,9 @@ def test_migration_removes_radio_coordinates(tmp_path):
     db = tmp_path / "old.db"
     s = Store(db)
     s.conn.execute("DROP TABLE positions")              # pretend the database is at version 3
+    for stmt in ("DROP TABLE keyups", "DROP TABLE names", "ALTER TABLE systems DROP COLUMN anchor", "ALTER TABLE systems DROP COLUMN name",
+                 "ALTER TABLE sites DROP COLUMN anchor", "ALTER TABLE sites DROP COLUMN name"):
+        s.conn.execute(stmt)                            # (and undo version 5)
     s.conn.execute("UPDATE schema_meta SET version = 3")
     s.conn.commit()
     s.conn.execute("ALTER TABLE survey_hits DROP COLUMN lat")
@@ -146,7 +149,7 @@ def test_migration_removes_radio_coordinates(tmp_path):
     s.commit()
     s.close()
     with Store(db) as s:
-        assert s.schema_version() == 4
+        assert s.schema_version() == 5
         payloads = [json.loads(r["payload"]) for r in s.rows("SELECT payload FROM csbk_events ORDER BY id")]
     assert payloads == [{"src": 1, "tgt": 2, "direction": "response", "has_position": True},
                         {"src": 3, "tgt": 2, "direction": "response", "has_position": False}]

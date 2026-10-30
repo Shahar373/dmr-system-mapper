@@ -2,7 +2,9 @@
 
 Layout: a status bar (daemon, receiver, power, session progress), a column of actions, and tabs
 for carriers, survey hits, systems, sessions and a log of commands. Everything is read from the
-database every two seconds; actions insert rows into ``commands`` for the daemon.
+database every two seconds; actions insert rows into ``commands`` for the daemon. Naming a system
+or site (``n`` on the Systems tab) is the one thing the console writes itself: it touches only
+``names`` and the ``name`` column, never the receiver.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from textual.widgets import Button, DataTable, Footer, Header, Input, Label, Ric
 
 from ..collector import state as st
 from ..collector.survey import latest_hits
+from ..correlate.names import display, set_name
 from ..db import Store
 
 REFRESH_S = 2.0
@@ -69,15 +72,21 @@ class StatusBar(Static):
         line1 = f"daemon [green]alive[/] pid {s.pid}   receiver {sdr_txt}   power {p_txt}   mode [b]{s.mode}[/]"
         pr = s.progress or {}
         line2 = s.message or ""
-        if s.mode in ("survey", "decode") and pr:
+        if s.mode in ("survey", "decode", "watch") and pr:
             el, bu = pr.get("elapsed_s"), pr.get("budget_s")
             tail = f"  {el}/{bu} s" if el is not None and bu else ""
             if s.mode == "survey":
                 line2 = f"survey #{s.session_id}: {pr.get('band', '')} step {pr.get('step', '?')}/{pr.get('steps', '?')} at {_mhz(pr.get('center_hz'))} MHz, {pr.get('hits', 0)} hits so far{tail}"
+            elif s.mode == "watch":
+                mark = {"pinned": "[b]CC[/]", "decoding": "[green]dec[/]", "waiting": "[yellow]wait[/]"}
+                cs = ", ".join(f"{_mhz(c['freq_hz'])} {mark.get(c.get('state'), '')} {c.get('snr_db') if c.get('snr_db') is not None else '?'} dB"
+                               for c in pr.get("channels", []))
+                line2 = (f"watch #{s.session_id} at {_mhz(pr.get('center_hz'))} MHz, DSD-FME {pr.get('instances', '?')}: {cs or 'all quiet'}"
+                         f"   key-ups {pr.get('keyups', 0)} (missed {pr.get('missed', 0)}){tail}")
             else:
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} ({c.get('syncs', 0)} syncs)" for c in pr.get("carriers", []))
                 line2 = f"decode #{s.session_id}: slice {pr.get('slice', '?')}/{pr.get('slices', '?')} ({pr.get('reason', '')}) {pr.get('slice_elapsed_s', 0)}/{pr.get('dwell_s', '?')} s: {cs}{tail}"
-        if s.mode in ("survey", "decode"):
+        if s.mode in ("survey", "decode", "watch"):
             g = pr.get("gps")
             line2 += f"\nGPS {g['lat']:.5f}, {g['lon']:.5f} ({g['fix']})" if g else f"\nGPS: no fix ({pr.get('gps_source', '?')})"
         self.update(line1 + "\n" + line2)
@@ -94,8 +103,9 @@ class MapperApp(App[None]):
     DataTable { height: 1fr; }
     """
     BINDINGS = [
-        Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"), Binding("x", "stop", "Stop"),
-        Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("r", "refresh", "Refresh"),
+        Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"),
+        Binding("w", "watch", "Watch"), Binding("x", "stop", "Stop"),
+        Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("n", "name", "Name"), Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
 
@@ -106,6 +116,8 @@ class MapperApp(App[None]):
         self.source = source
         self.store: Store | None = None
         self._seen_commands: set[int] = set()
+        self._systems_sig: str | None = None
+        self._selected: tuple[str, int] | None = None      # ("system"|"site", id) highlighted in the Systems tree
         self._stale_s = int((cfg.get("daemon", {}) or {}).get("heartbeat_stale_s", 10))
 
     # -- layout -----------------------------------------------------------------------------------
@@ -119,9 +131,12 @@ class MapperApp(App[None]):
                 yield Button("Survey+Decode (a)", id="auto", variant="success")
                 yield Button("Survey (s)", id="survey", variant="primary")
                 yield Button("Decode (d)", id="decode", variant="primary")
+                yield Button("Watch slice (w)", id="watch", variant="primary")
                 yield Button("Stop (x)", id="stop", variant="error")
                 yield Button("Correlate (c)", id="correlate")
                 yield Button("Export map (e)", id="export")
+                yield Label("name (Systems tab: n)")
+                yield Input(placeholder="select a system or site", id="name")
             with TabbedContent(id="tabs"):
                 with TabPane("Carriers", id="tab-carriers"):
                     yield DataTable(id="carriers", cursor_type="row")
@@ -171,7 +186,7 @@ class MapperApp(App[None]):
         assert self.store is not None
         t = self.query_one("#carriers", DataTable)
         rows = self.store.rows(
-            "SELECT c.*, s.site_number, s.label AS site_label, sy.label AS system_label,"
+            "SELECT c.*, s.site_number, s.label AS site_label, COALESCE(sy.name, sy.label) AS system_label,"
             " (SELECT COALESCE(SUM(seconds_observed), 0) FROM observations o WHERE o.carrier_id = c.id) AS secs,"
             " (SELECT COALESCE(SUM(bursts), 0) FROM observations o WHERE o.carrier_id = c.id) AS bursts"
             " FROM carriers c LEFT JOIN carrier_sites cs ON cs.carrier_id = c.id LEFT JOIN sites s ON s.id = cs.site_id"
@@ -194,17 +209,21 @@ class MapperApp(App[None]):
     def _refresh_systems(self) -> None:
         assert self.store is not None
         tree = self.query_one("#systems", Tree)
+        systems = [dict(r) for r in self.store.rows("SELECT * FROM systems ORDER BY id")]
+        sites = [dict(r) for r in self.store.rows("SELECT * FROM sites ORDER BY system_id, directly_observed DESC, id")]
+        members = [dict(r) for r in self.store.rows(
+            "SELECT cs.site_id, cs.lcn, c.freq_hz, c.variant, c.dominant_cc FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id ORDER BY c.freq_hz")]
+        sig = repr((systems, sites, members))
+        if sig == self._systems_sig:
+            return            # unchanged: keep the tree (and the highlighted node) as it is
+        self._systems_sig = sig
         tree.clear()
-        systems = self.store.rows("SELECT * FROM systems ORDER BY id")
-        sites = self.store.rows("SELECT * FROM sites ORDER BY system_id, directly_observed DESC, id")
-        members = self.store.rows(
-            "SELECT cs.site_id, cs.lcn, c.freq_hz, c.variant, c.dominant_cc FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id ORDER BY c.freq_hz")
         tree.root.set_label(f"{len(systems)} systems")
         for sy in systems:
-            n = tree.root.add(f"{sy['label']}  [{sy['variant']}]", expand=True)
+            n = tree.root.add(f"{display(sy['name'], sy['label'])}  [{sy['variant']}]", data=("system", sy["id"]), expand=True)
             for si in [x for x in sites if x["system_id"] == sy["id"]]:
-                label = si["label"] + ("" if si["directly_observed"] else "  (announced only)")
-                sn = n.add(label, expand=True)
+                label = display(si["name"], si["label"]) + ("" if si["directly_observed"] else "  (announced only)")
+                sn = n.add(label, data=("site", si["id"]), expand=True)
                 for m in [x for x in members if x["site_id"] == si["id"]]:
                     lcn = f"  LCN {m['lcn']}" if m["lcn"] else ""
                     sn.add_leaf(f"{_mhz(m['freq_hz'])} MHz  {m['variant']}  cc={m['dominant_cc']}{lcn}")
@@ -219,6 +238,10 @@ class MapperApp(App[None]):
             sm = s["summary"]
             if s["kind"] == "survey":
                 text = ", ".join(f"{b}: {v['hits']} hits" for b, v in (sm.get("bands") or {}).items())
+            elif s["kind"] == "watch":
+                w = sm.get("watch") or {}
+                text = (f"{_mhz((sm.get('plan') or {}).get('center_hz'))} MHz: {w.get('keyups', 0)} key-ups, {w.get('decoded', 0)} decoded,"
+                        f" {w.get('missed', 0)} missed, {len(sm.get('carriers') or {})} carriers")
             else:
                 text = f"{len(sm.get('carriers') or {})} carriers, {len(sm.get('slices') or [])} slices"
             if sm.get("error"):
@@ -287,6 +310,43 @@ class MapperApp(App[None]):
             params["budget_s"] = b
         self._post("start_decode", params)
 
+    def action_watch(self) -> None:
+        params: dict[str, Any] = {}
+        if (b := self._budget_s()) is not None:
+            params["budget_s"] = b
+        self._post("start_watch", params)
+
+    def action_name(self) -> None:
+        if self._selected is None:
+            self.query_one("#log", RichLog).write("[yellow]select a system or site on the Systems tab first[/]")
+            return
+        box = self.query_one("#name", Input)
+        box.placeholder = f"name for {self._selected[0]} {self._selected[1]} (empty: remove)"
+        box.focus()
+
+    @on(Tree.NodeHighlighted, "#systems")
+    def _system_highlighted(self, event: Tree.NodeHighlighted) -> None:
+        if event.node.data:
+            self._selected = event.node.data
+
+    @on(Input.Submitted, "#name")
+    def _name_submitted(self, event: Input.Submitted) -> None:
+        assert self.store is not None
+        log = self.query_one("#log", RichLog)
+        if self._selected is None:
+            return
+        kind, tid = self._selected
+        try:
+            res = set_name(self.store, kind, str(tid), event.value.strip() or None)
+            log.write(f"{kind} {tid}: " + (f"named [b]{res['name']}[/]" if res["name"] else "name removed")
+                      + (f" (follows {res['anchor']})" if res["anchor"] else " (follows its carriers)"))
+        except (KeyError, ValueError) as exc:
+            log.write(f"[red]{exc.args[0] if exc.args else exc}[/]")
+        event.input.value = ""
+        self._systems_sig = None
+        self.refresh_all()
+        self.query_one("#systems", Tree).focus()
+
     def action_stop(self) -> None:
         self._post("stop")
 
@@ -301,7 +361,7 @@ class MapperApp(App[None]):
 
     @on(Button.Pressed)
     def _button(self, event: Button.Pressed) -> None:
-        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "stop": self.action_stop,
+        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "watch": self.action_watch, "stop": self.action_stop,
                   "correlate": self.action_correlate, "export": self.action_export}.get(event.button.id or "")
         if action:
             action()

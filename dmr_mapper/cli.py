@@ -65,7 +65,7 @@ def cmd_status(args: argparse.Namespace) -> int:
         for sess in st.sessions(store, 3):
             print(f"  session {sess['id']} {sess['kind']} {sess['status']} budget {sess['budget_s']}s elapsed {sess['summary'].get('elapsed_s', '-')}s")
         for name in ("carriers", "observations", "csbk_events", "rest_events", "identities", "identity_sightings",
-                     "links", "evidence", "ingest_runs", "survey_hits"):
+                     "links", "evidence", "ingest_runs", "survey_hits", "keyups", "names"):
             print(f"  {name:20s} {store.scalar(f'SELECT COUNT(*) FROM {name}')}")
         print("carriers:")
         for c in store.carriers():
@@ -345,6 +345,59 @@ def cmd_decode(args: argparse.Namespace) -> int:
     return _session_command(args, "start_decode", params)
 
 
+def _freq_arg(text: str) -> int:
+    """A frequency in Hz (469350000) or MHz with a dot (469.35)."""
+    t = str(text).strip()
+    return int(round(float(t) * 1e6)) if "." in t else int(t)
+
+
+def cmd_watch(args: argparse.Namespace) -> int:
+    params: dict = {}
+    if args.freq:
+        params["freqs"] = [_freq_arg(f) for f in args.freq]
+    if args.center:
+        params["center_hz"] = _freq_arg(args.center)
+    if args.instances:
+        params["max_instances"] = int(args.instances)
+    return _session_command(args, "start_watch", params)
+
+
+def cmd_name(args: argparse.Namespace) -> int:
+    from .correlate.names import set_name
+
+    if not args.clear and not args.name:
+        print("give a name, or --clear to remove one", file=sys.stderr)
+        return 2
+    cfg = load_config(args.config)
+    with _open_store(args, cfg) as store:
+        try:
+            res = set_name(store, args.kind, args.target, None if args.clear else " ".join(args.name))
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc.args[0] if exc.args else exc}", file=sys.stderr)
+            return 1
+    anchor = f"anchored on {res['anchor']}" if res["anchor"] else "anchored on its carriers " + ", ".join(f"{f / 1e6:.4f}" for f in res["carriers"])
+    print(f"{res['kind']} {res['id']}: " + (f"named {res['name']!r} ({anchor})" if res["name"] else "name removed"))
+    return 0
+
+
+def cmd_names(args: argparse.Namespace) -> int:
+    from .correlate.names import list_names
+
+    cfg = load_config(args.config)
+    with _open_store(args, cfg) as store:
+        names = list_names(store)
+    if args.json:
+        print(json.dumps(names, indent=2, ensure_ascii=False))
+        return 0
+    if not names:
+        print("no names yet: mapper name system|site <id or frequency> <name>")
+    for n in names:
+        where = f"{n['kind']} {', '.join(map(str, n['now_on']))}" if n["now_on"] else f"no {n['kind']} matches it right now"
+        anchor = n["anchor"] or "carriers " + ", ".join(f"{f / 1e6:.4f}" for f in n["carriers"])
+        print(f"  {n['kind']:6s} {n['name']!r:30s} {anchor:30s} -> {where}")
+    return 0
+
+
 def cmd_control(args: argparse.Namespace) -> int:
     from .collector import state as st
 
@@ -549,6 +602,26 @@ def build_parser() -> argparse.ArgumentParser:
     dc.add_argument("--no-wait", dest="wait", action="store_false")
     dc.set_defaults(func=cmd_decode)
 
+    wa = sub.add_parser("watch", help="watch one slice: control channels decoded throughout, traffic channels when they key up")
+    wa.add_argument("freq", nargs="*", help="carriers the slice must hold, Hz or MHz (default: the Tier III network with the most carriers)")
+    wa.add_argument("--center", help="tune here instead (Hz or MHz)")
+    wa.add_argument("--minutes", type=float, help="session budget")
+    wa.add_argument("--instances", type=int, help="DSD-FME processes at once (default from power state: watch.max_instances / power.battery_watch_instances)")
+    wa.add_argument("--wait", action="store_true", default=True)
+    wa.add_argument("--no-wait", dest="wait", action="store_false")
+    wa.set_defaults(func=cmd_watch)
+
+    na = sub.add_parser("name", help="give a system or site a name (kept across correlator runs)")
+    na.add_argument("kind", choices=["system", "site"])
+    na.add_argument("target", help="its id from `mapper systems`, or the frequency of one of its carriers (Hz or MHz)")
+    na.add_argument("name", nargs="*", help="the name (several words are joined)")
+    na.add_argument("--clear", action="store_true", help="remove the name instead")
+    na.set_defaults(func=cmd_name)
+
+    ns = sub.add_parser("names", help="list the names given to systems and sites")
+    ns.add_argument("--json", action="store_true")
+    ns.set_defaults(func=cmd_names)
+
     for kind, help_ in (("stop", "stop the running session"), ("correlate-now", "ask the daemon to run the correlator")):
         cp = sub.add_parser(kind, help=help_)
         cp.set_defaults(func=cmd_control, kind=kind.replace("-now", ""))
@@ -562,9 +635,9 @@ def build_parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("doctor", help="check this machine: python packages, SoapySDR, dsd-fme, receiver, power, database")
     dr.set_defaults(func=cmd_doctor)
 
-    sp = sub.add_parser("serve-mcp", help="(Phase 4)")
+    sp = sub.add_parser("serve-mcp", help="(Phase 5)")
     sp.add_argument("rest", nargs="*")
-    sp.set_defaults(func=_not_yet("4"))
+    sp.set_defaults(func=_not_yet("5"))
     return p
 
 

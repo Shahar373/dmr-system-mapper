@@ -42,8 +42,8 @@ dsd-fme -fs -i tcp:127.0.0.1:7355 -o null -Z -D 0 2>&1 \
 | `-fs` | DMR TDMA BS/MS simplex decoder: the right mode for passive monitoring of a single carrier (both slots). Not `-ft`, which adds P25 and auto-detection noise. |
 | `-i tcp:127.0.0.1:<port>` | PCM input from the collector's channelizer (the collector is the TCP *server*; DSD-FME connects as a client, same as SDR++ / GQRX mode). Ports `decode.tcp_base_port + instance`. |
 | `-o null` | No audio output; no PulseAudio needed on the headless Pi. |
-| `-Z` | "Log MBE/PDU payloads". Adds lines the parser wants: Tier III `SYS: XXXX; Reg: …` system code block after `C_ALOHA`/`C_BCAST`, XPT `Free LCN n;` on voice LC, `Cap+ Rest LSN Change: …`. Costs a few extra lines per CSBK, nothing else. |
-| `-D 0` | Tier III: show the full Site ID instead of area/sub-area split, so site numbers are comparable across carriers. Harmless on other variants. |
+| `-Z` | "Log MBE/PDU payloads". Adds lines the parser wants: Tier III `SYS: XXXX; Reg: …` system code block after `C_ALOHA`/`C_BCAST`, XPT `Free LCN n;` on voice LC, `Cap+ Rest LSN Change: …`, and the bytes of every short LC (`SLCO Completed Block`) and every non-idle data burst (`DMR PDU Payload`), from which the Capacity Max messages DSD-FME does not print are read (Phase 4). A few extra lines per burst; only decoded events are stored. |
+| `-D 0` | Tier III site numbering. DSD-FME reads the value as a character, so `0` becomes 48, clamped to 10: every Tier III identity prints as `Net ID: net+1; Site ID: 1.site+1` (raw net 1 site 1 → `Net ID: 2; Site ID: 1.2`). Kept because the database already uses this numbering; after a Motorola (FID 0x10) Aloha or broadcast DSD-FME switches to raw numbers by itself, and the parser converts those back (DESIGN.md §6). Harmless on other variants. |
 | `2>&1` | Everything DSD-FME prints is on stderr. |
 
 Not used, and why:
@@ -163,6 +163,21 @@ Burst types seen: `CSBK`, `VLC`, `TLC`, `VC1`–`VC6`, `VC1*`, `IDLE`, `DATA`, `
   Frequency: 165.125000 MHz                                                   (only with -C channel map)
   SYS: 1A2B; Reg: 1; Backoff: 3; BParms1: 0000; BParms2: 000000;              (with -Z)
 ```
+
+**Capacity Max** (Motorola Tier III; formats from the DSD-FME source, not yet seen in `samples/`)
+```
+ SLC_C_SYS_PARMS: Large; Net ID: 2; Site ID: 1.2; Reg Req: 1; CSC: 143; SYS: 2101;     ✔ field run (control channel)
+ SLC_P_SYS_PARMS: Large; Net ID: 2; Site ID: 1.3; Comp CC: 0; SYS: 2102;              ✔ field run (traffic channel)
+ SLCO Capacity Plus Site: 0 - Rest LSN: 0 - RS: 00                                      ✔ field run: SLCO 0xF, a Motorola message, not Cap+
+ SLCO Completed Block [21][01][00][00][00]                                              (-Z, after every decoded short LC)
+ SLCO Cap Max Activity Update; TGT: 2102;
+ C_ALOHA_SYS_PARMS: Large; Net ID: 1; Site ID: 1; SYS: 2101; Capacity Max              (raw numbering from here on)
+ Announcements (C_BCAST) Adjacent Site Information (Adjacent_Site)
+ Large; Net ID: 1; Site ID: 3; SYS: 2103; Active Connection Information Not Available;  (no LCN printed: read from the bytes)
+ DMR PDU Payload [A1][10][00][70][00][08][36][00][00][00][xx][xx]                      (-Z; FID 0x10 opcode 0x21: TG 2102 on LCN 7, slot 1)
+```
+Channel updates (FID 0x10, opcodes 0x21 Open Mode / 0x22 Advantage Mode) produce no text at all:
+only the `DMR PDU Payload` line. A CSBK is used only when its own CRC-16 checks out.
 
 **Hytera XPT**
 ```

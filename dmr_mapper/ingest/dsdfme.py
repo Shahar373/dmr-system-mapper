@@ -21,7 +21,8 @@ from pathlib import Path
 from typing import Any, Iterable, Iterator
 from zoneinfo import ZoneInfo
 
-from .events import Burst, Event, Meta, NoSync, Quality, Structural, Unrecognized
+from .events import Burst, Event, Meta, NoSync, Quality, RawOpcode, Structural, Unrecognized
+from .rawpdu import csbk_crc_ok, decode_csbk, decode_slco_block, hex_bytes, printed_ids
 
 ANSI_RE = re.compile(r"\x1b(?:\[[0-9;?]*[ -/]*[@-~]|\(.)")
 
@@ -135,7 +136,11 @@ ACTIVITY_RE = re.compile(r"Activity Update TS1: (?P<ts1>[^;]+); Hash: (?P<h1>\d+
 MOTO_DATA_RE = re.compile(r"Moto Data Channel: (?P<op>[0-9A-Fa-f]+); (?P<bytes>(?:[0-9A-Fa-f]{2} ?)+)")
 SLCO_NULL_RE = re.compile(r"^SLCO NULL")
 SLCO_CRC_RE = re.compile(r"^SLCO CRC ERR")
-SLCO_OTHER_RE = re.compile(r"^SLCO (?:Cap Max Activity Update; TGT: (?P<tgt>\d+);|Caltta: (?P<caltta>\w+);|Unknown - (?P<unk>\d+)|Completed Block)")
+SLCO_OTHER_RE = re.compile(r"^SLCO (?:Caltta: (?P<caltta>\w+);|Unknown - (?P<unk>\d+))")
+CAPMAX_ACT_RE = re.compile(r"^SLCO Cap Max Activity Update; TGT: (?P<tgt>\d+);")
+# with -Z: the bytes of every short LC (after its decoded line) and of every non-idle data burst
+SLCO_BLOCK_RE = re.compile(r"^SLCO Completed Block (?P<hex>(?:\[[0-9A-Fa-f]{2}\])+)")
+PDU_RE = re.compile(r"^DMR PDU Payload (?P<hex>(?:\[[0-9A-Fa-f]{2}\])+)")
 LC_RE = re.compile(r"SLOT (?P<slot>\d) (?P<kind>Protected|Unknown) LC\s+FLCO=(?P<flco>0x[0-9A-Fa-f]+) FID=(?P<fid>0x[0-9A-Fa-f]+)")
 ERR_LINE_RE = re.compile(r"FLCO FEC ERR|SB/RC \(FEC ERR\)|Protected Control Signalling Block|Multi Block PDU Message CRC32 ERR|CRC32 ERR|VOICE CACH/EMB ERR|CACH/Burst FEC ERR|\(CRC ERR\)\s*$|Frame Sync Err")
 DATA_HDR_RE = re.compile(r"Slot (?P<slot>\d) Data Header - (?P<addr>Indiv|Group) - (?P<delivery>.+?) - Source: (?P<src>\d+) Target: (?P<tgt>\d+)")
@@ -151,6 +156,9 @@ META_RE = re.compile(
 )
 UNKNOWN_CSBK_RE = re.compile(r"Unknown CSBK|CSBK Opcode|MFID: |Opcode: ")
 
+# Short-LC lines (decoded from the CACH of any burst)
+_SLC_PREFIXES = ("SLCO", "SLC_", "Activity Update")
+
 # Which pending records accept which continuation lines
 _PENDING_KINDS_WITH_LSN = {"capplus_channel_status", "xpt_site_status"}
 
@@ -159,6 +167,7 @@ _NEW_RECORD_RES = (
     CAP_STATUS_RE, CAP_SITE_RE, CAP_ADJ_HDR_RE, CAP_REST_CHANGE_RE, PREAMBLE_RE, CALL_RE,
     CON_SYS_RE, CON_ADJ_RE, CON_VGRANT_RE, CON_DGRANT_RE, T3_SYS_RE, T3_BCAST_RE, T3_GRANT_RE,
     XPT_STATUS_RE, XPT_ADJ_HDR_RE, XPT_SLCO_RE, ACTIVITY_RE, MOTO_DATA_RE, DATA_HDR_RE, IP_MAP_RE, LRRP_RE,
+    CAPMAX_ACT_RE, SLCO_BLOCK_RE, PDU_RE,
 )
 
 
@@ -184,6 +193,12 @@ class LineParser:
         self._pending: Structural | None = None
         self._start: datetime | None = None         # resolved start time (cached once)
         self._individual_targets: set[int] = set()  # IDs seen as Individual/Indiv targets (radios, not TGs)
+        self._burst_kind: str | None = None         # label of the last burst (CSBK, VLC, ...)
+        self._lines_since_burst = 0                 # payload lines DSD-FME printed for that burst
+        self._slco: Structural | None = None        # decoded short LC waiting for its Completed Block line
+        self._tier3_lines = 0                       # Tier III system parameters seen in this stream
+        self._capplus_lines = 0                     # Cap+ channel status CSBKs seen in this stream
+        self._raw_numbering = False                 # DSD-FME switched to raw Net/Site numbers (see _t3_ids)
         self.lines = 0
         self.parsed = 0
         self.unrecognized = 0
@@ -261,6 +276,10 @@ class LineParser:
         stripped = line.strip()
         if not stripped:
             return
+        if self._slco is not None and not SLCO_BLOCK_RE.match(stripped):
+            # with -Z the bytes of a short LC follow its decoded line; anything else means there are none
+            yield self._slco
+            self._slco = None
 
         if NO_SYNC_RE.match(stripped):
             yield from self._flush()
@@ -287,6 +306,8 @@ class LineParser:
             return
 
         handled = yield from self._payload(stripped)
+        if not stripped.startswith(_SLC_PREFIXES):
+            self._lines_since_burst += 1     # short LCs come from the CACH, not from the burst itself
         if handled:
             self.parsed += 1
         else:
@@ -294,6 +315,9 @@ class LineParser:
             yield Unrecognized(self._ts, stripped[:200])
 
     def finish(self) -> Iterator[Event]:
+        if self._slco is not None:
+            yield self._slco
+            self._slco = None
         yield from self._flush()
 
     # -- burst lines ------------------------------------------------------------------------------
@@ -327,6 +351,8 @@ class LineParser:
         self._slot = slot
         if cc is not None:
             self._cc = cc
+        self._burst_kind = kind
+        self._lines_since_burst = 0
         yield Burst(self._ts, m.group("pol"), slot, cc, kind, crc, tail.strip()[:120])
 
     # -- payload lines ----------------------------------------------------------------------------
@@ -398,13 +424,20 @@ class LineParser:
 
         # --- Capacity Plus -----------------------------------------------------------------------
         if m := CAP_STATUS_RE.search(s):
+            self._capplus_lines += 1
             yield from self._open("capplus_channel_status", {
                 "fl": int(m.group("fl")), "ts": int(m.group("ts")), "rs": int(m.group("rs")),
                 "rest_lsn": int(m.group("rest")), "block": (m.group("block") or "Single").lower(), "lsn_states": {},
             })
             return True
         if m := CAP_SITE_RE.search(s):
-            yield self._event("capplus_site", {"site": int(m.group("site")), "rest_lsn": int(m.group("rest")), "rs": m.group("rs")})
+            if self._tier3_lines >= 3 and self._tier3_lines > self._capplus_lines:
+                # SLCO opcode 0xF on a Tier III (Capacity Max) carrier is a Motorola message that
+                # DSD-FME prints as a Cap+ site; keep its bits, not the site number (one stray Tier
+                # III line on a Cap+ carrier must not take its sites away, hence the counts)
+                self._slco = self._event("capmax_slco", {"opcode": 15, "data": None, "printed_as": s[5:60].strip()})
+            else:
+                self._slco = self._event("capplus_site", {"site": int(m.group("site")), "rest_lsn": int(m.group("rest")), "rs": m.group("rs")})
             return True
         if CAP_ADJ_HDR_RE.search(s):
             yield from self._open("capplus_adjacent", {"sites": []})
@@ -451,7 +484,7 @@ class LineParser:
 
         # --- Connect Plus ------------------------------------------------------------------------
         if m := CON_SYS_RE.search(s):
-            yield self._event("conplus_sys", {"role": m.group("role").lower(), "net_id": int(m.group("net")), "site_id": int(m.group("site"))})
+            self._slco = self._event("conplus_sys", {"role": m.group("role").lower(), "net_id": int(m.group("net")), "site_id": int(m.group("site"))})
             return True
         if m := CON_ADJ_RE.search(s):
             sites = [int(x) for x in re.findall(r"\d+", m.group("list"))]
@@ -475,9 +508,13 @@ class LineParser:
 
         # --- Tier III ----------------------------------------------------------------------------
         if m := T3_SYS_RE.search(s):
+            self._tier3_lines += 1
+            if "Capacity Max" in s:
+                self._raw_numbering = True      # this very line is already printed raw
+            net, site, sub = self._t3_ids(int(m.group("net")), int(m.group("site")), int(m.group("sub")) if m.group("sub") else None)
             payload = {
-                "source": m.group("src").lower(), "model": m.group("model"), "net_id": int(m.group("net")),
-                "site_id": int(m.group("site")), "sub_site": int(m.group("sub")) if m.group("sub") else None,
+                "source": m.group("src").lower(), "model": m.group("model"), "net_id": net,
+                "site_id": site, "sub_site": sub,
                 "sys_code": m.group("sys").upper() if m.group("sys") else None, "cat": m.group("cat"),
                 "reg": int(m.group("reg")) if m.group("reg") else None, "csc": int(m.group("csc")) if m.group("csc") else None,
             }
@@ -511,14 +548,14 @@ class LineParser:
             )
             return True
         if m := XPT_SLCO_RE.search(s):
-            yield self._event("xpt_slco", {"free_lcn": int(m.group("free")), "pri_lcn": int(m.group("pri")), "pri_hash": m.group("hash")})
+            self._slco = self._event("xpt_slco", {"free_lcn": int(m.group("free")), "pri_lcn": int(m.group("pri")), "pri_hash": m.group("hash")})
             return True
         if XPT_TUNE_RE.search(s):
             return True
 
         # --- Common / Tier II ----------------------------------------------------------------------
         if m := ACTIVITY_RE.search(s):
-            yield self._event("activity_update", {
+            self._slco = self._event("activity_update", {
                 "ts1": m.group("ts1").strip(), "hash1": int(m.group("h1")),
                 "ts2": m.group("ts2").strip() if m.group("ts2") else None, "hash2": int(m.group("h2")) if m.group("h2") else None,
             })
@@ -532,8 +569,20 @@ class LineParser:
         if SLCO_CRC_RE.match(s):
             yield Quality(self._ts, "slco_crc")
             return True
+        if m := CAPMAX_ACT_RE.match(s):
+            tgt = int(m.group("tgt"))
+            self._slco = self._event("capmax_activity", {"tgt": tgt}, [("tg", tgt, "activity")] if tgt else [])
+            return True
         if m := SLCO_OTHER_RE.match(s):
-            yield self._event("slco_other", {"text": s[:80]})
+            self._slco = self._event("slco_other", {"text": s[:80]})
+            return True
+        if m := SLCO_BLOCK_RE.match(s):
+            self._slco_block(hex_bytes(m.group("hex")))
+            yield Quality(self._ts, "slco_block")
+            return True
+        if m := PDU_RE.match(s):
+            yield from self._raw_pdu(hex_bytes(m.group("hex")))   # may still correct the pending record
+            yield from self._flush()
             return True
         if m := LC_RE.search(s):
             if "CRC ERR" in s:
@@ -580,9 +629,72 @@ class LineParser:
             return True
         return False
 
-    # -- Tier III broadcast continuation ------------------------------------------------------------
+    # -- Tier III numbering ---------------------------------------------------------------------------
+    def _t3_ids(self, net: int, site: int, sub: int | None) -> tuple[int, int, int | None]:
+        """DSD-FME prints Tier III identities as ``Net ID: net+1; Site ID: 1.site+1`` (``-D 0``,
+        see rawpdu.printed_ids), but once it has decoded one Motorola (FID 0x10) Aloha or broadcast
+        it switches the whole process to raw ``Net ID: net; Site ID: site``. Raw prints after that
+        point are converted back, so one site keeps one number."""
+        if sub is None and self._raw_numbering:
+            return printed_ids(net, site)
+        return net, site, sub
+
     @staticmethod
-    def _t3_detail(p: Structural, s: str) -> bool:
+    def _set_ids(payload: dict[str, Any], ident: dict[str, Any], prefix: str = "") -> None:
+        net, site, sub = printed_ids(ident["net"], ident["site"])
+        payload[prefix + "model"] = ident["model"]
+        payload[prefix + "net_id"], payload[prefix + "site_id"], payload[prefix + "sub_site"] = net, site, sub
+        payload["sys_code"] = ident["sys_code"]
+
+    # -- raw bytes (-Z) ------------------------------------------------------------------------------
+    def _slco_block(self, b: bytes) -> None:
+        """Attach the short LC's own bits to the event DSD-FME's decoded line produced."""
+        d = decode_slco_block(b)
+        if d is None:
+            return
+        target = self._slco
+        if target is not None and target.kind in ("capmax_slco", "slco_other"):
+            target.payload["opcode"] = d["opcode"]
+            target.payload["data"] = d["data"]
+        p = self._pending
+        if d.get("own") and target is None and p is not None and p.kind == "tier3_sys_parms" and str(p.payload.get("source", "")).startswith("slc_"):
+            self._set_ids(p.payload, d["own"])      # the bits settle the numbering
+
+    def _raw_pdu(self, b: bytes) -> Iterator[Event]:
+        """``DMR PDU Payload``: only CSBKs are read, and only what DSD-FME printed nothing for."""
+        if self._burst_kind != "CSBK" or len(b) != 12:
+            return
+        if not csbk_crc_ok(b):
+            yield Quality(self._ts, "pdu_crc_err")
+            return
+        d = decode_csbk(b)
+        key = f"FID {d['fid']:02X} opcode {d['opcode']:02X}"
+        p = self._pending
+        if d.get("kind") in ("aloha", "adjacent_site") or (d["opcode"] == 40 and d.get("a_type") == 2):
+            if d["fid"] == 0x10:
+                self._raw_numbering = True      # what DSD-FME prints from now on is raw
+            if d.get("kind") == "aloha" and p is not None and p.kind == "tier3_sys_parms" and p.payload.get("source") == "c_aloha_sys_parms":
+                self._set_ids(p.payload, d["own"])
+            if d.get("kind") == "adjacent_site" and p is not None and p.kind == "tier3_bcast" and p.payload.get("a_type") == "adjacent_site":
+                # DSD-FME leaves the neighbour's channel out when "connection information" is not
+                # available; on Capacity Max that channel is the neighbour's LCN
+                self._set_ids(p.payload, d["neighbor"], "adj_")
+                if d["channel"] not in (0, 0xFFF):
+                    p.payload["lpcn"] = d["channel"]
+                p.payload["own_sys_code"] = d["own"]["sys_code"]
+        if d.get("kind") == "capmax_channel_update":
+            for u in d["updates"]:
+                ids = [("tg", u["tg"], "tgt")] if d["mode"] == "open" else []
+                yield self._event("capmax_channel_update", {"mode": d["mode"], "lcn": u["lcn"], "slot": u["slot"], "tg": u["tg"]}, ids)
+            yield RawOpcode(self._ts, key, True, "")
+        elif self._lines_since_burst == 0 and not d["pf"]:
+            # DSD-FME printed nothing for this CSBK and it is not one read here either
+            yield RawOpcode(self._ts, key, False, " ".join(f"{x:02X}" for x in b))
+        else:
+            yield RawOpcode(self._ts, key, True, "")
+
+    # -- Tier III broadcast continuation ------------------------------------------------------------
+    def _t3_detail(self, p: Structural, s: str) -> bool:
         hit = False
         if m := T3_ONLINE_RE.search(s):
             p.payload["online"] = m.group("state") == "Online"
@@ -606,10 +718,11 @@ class LineParser:
             p.payload["tx_freq_hz"] = int(m.group("freq"))
             hit = True
         if m := T3_ADJ_ID_RE.match(s):
+            net, site, sub = self._t3_ids(int(m.group("net")), int(m.group("site")), int(m.group("sub")) if m.group("sub") else None)
             p.payload["adj_model"] = m.group("model")
-            p.payload["adj_net_id"] = int(m.group("net"))
-            p.payload["adj_site_id"] = int(m.group("site"))
-            p.payload["adj_sub_site"] = int(m.group("sub")) if m.group("sub") else None
+            p.payload["adj_net_id"] = net
+            p.payload["adj_site_id"] = site
+            p.payload["adj_sub_site"] = sub
             hit = True
         if m := T3_SYSCODE_RE.search(s):
             p.payload["sys_code"] = m.group("sys").upper()

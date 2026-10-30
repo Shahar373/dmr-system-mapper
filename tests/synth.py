@@ -181,3 +181,97 @@ def tier3_traffic(out_dir: Path, sys_code: str, net: int, site: int, cc: int, fr
     p = out_dir / f"dsd_fme_{freq}_{start.strftime('%Y%m%d_%H%M%S')}.log"
     p.write_text("".join(lines), encoding="utf-8")
     return p
+
+
+# -- Capacity Max ---------------------------------------------------------------------------------
+def csbk_pdu(opcode: int, fid: int, fields: list[tuple[int, int, int]]) -> str:
+    """A ``DMR PDU Payload`` line for a CSBK with a valid CRC; ``fields`` = [(start_bit, length, value)]."""
+    from dmr_mapper.ingest.rawpdu import CSBK_CRC_MASK, crc16_ccitt
+
+    v = (1 << 79) | (opcode << 72) | (fid << 64)
+    for at, length, value in fields:
+        v |= (value & ((1 << length) - 1)) << (80 - at - length)
+    b = v.to_bytes(10, "big") + (crc16_ccitt(v, 80) ^ CSBK_CRC_MASK).to_bytes(2, "big")
+    return " DMR PDU Payload " + "".join(f"[{x:02X}]" for x in b) + "\n"
+
+
+def slco_block(opcode: int, data: int) -> str:
+    v = (opcode << 36) | (data << 12)
+    return " SLCO Completed Block " + "".join(f"[{x:02X}]" for x in v.to_bytes(5, "big")) + "\n"
+
+
+def large_syscode(net: int, site: int) -> int:
+    return (2 << 12) | (net << 8) | site
+
+
+def capmax_site(out_dir: Path, net: int, site: int, cc: int, control_freq: int, traffic: dict[int, int],
+                calls: list[tuple[int, int, int, int, int, int]], neighbors: list[tuple[int, int]] | None = None,
+                minutes: int = 5, start: datetime = START, payload_lines: bool = True) -> tuple[list[Path], list[tuple[int, int, int]]]:
+    """A Capacity Max site (Large model, raw ``net``/``site`` as on air). The control channel
+    prints what this DSD-FME build prints there: SLC_C_SYS_PARMS in -D 0 numbering until the first
+    Motorola broadcast, raw after it; Adjacent_Site broadcasts without the LCN; channel updates
+    (FID 0x10 opcode 0x21) only as ``DMR PDU Payload``. Traffic channels (``traffic`` = {lcn: freq})
+    transmit only during calls: ``calls`` = [(offset_s, tg, src, lcn, slot, seconds)].
+    Returns the logs and the key-ups [(freq, start_epoch, end_epoch)] a slice watcher would see."""
+    from dmr_mapper.ingest.rawpdu import address_hash
+
+    code = large_syscode(net, site)
+    end = start + timedelta(minutes=minutes)
+    cc_lines = ["Build Version: AW synthetic\n"]
+    raw = False
+    t = start
+    while t < end:
+        off = int((t - start).total_seconds())
+        slot = 1 + off % 2
+        cc_lines.append(_sync(t, slot, cc, "CSBK"))
+        shown = f"Net ID: {net}; Site ID: {site};" if raw else f"Net ID: {net + 1}; Site ID: 1.{site + 1};"
+        cc_lines.append(f" SLC_C_SYS_PARMS: Large; {shown} Reg Req: 1; CSC: {off % 512}; SYS: {code:04X};\n")
+        if payload_lines:
+            cc_lines.append(slco_block(2, (code << 10) | (1 << 9) | (off % 512)))
+        active = [c for c in calls if c[0] <= off < c[0] + c[5]]
+        if active and payload_lines:
+            _, tg, _, lcn, cslot, _ = active[off % len(active)]
+            fields = [(16, 12, lcn), (32 if cslot == 1 else 56, 24, tg)]
+            cc_lines.append(csbk_pdu(0x21, 0x10, fields))
+        elif neighbors and off % 10 == 5:
+            n_site, n_lcn = neighbors[(off // 10) % len(neighbors)]
+            n_code = large_syscode(net, n_site)
+            cc_lines.append(" Announcements (C_BCAST) Adjacent Site Information (Adjacent_Site)\n")
+            # DSD-FME decodes this Motorola broadcast with raw numbering, and switches to it for good
+            cc_lines.append(f" Large; Net ID: {net}; Site ID: {n_site}; SYS: {n_code:04X}; Active Connection Information Not Available;\n")
+            if payload_lines:
+                cc_lines.append(csbk_pdu(40, 0x10, [(16, 5, 6), (21, 14, n_code), (40, 14, code), (68, 12, n_lcn)]))
+            raw = True
+        elif off % 20 == 7:
+            cc_lines.append(" SLCO Capacity Plus Site: 0 - Rest LSN: 0 - RS: 00\n")
+            if payload_lines:
+                cc_lines.append(slco_block(0xF, 0x00A5C3))
+        t += timedelta(seconds=1)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    paths = [out_dir / f"dsd_fme_{control_freq}_{start.strftime('%Y%m%d_%H%M%S')}.log"]
+    paths[0].write_text("".join(cc_lines), encoding="utf-8")
+    keyups: list[tuple[int, int, int]] = []
+    for lcn, freq in traffic.items():
+        mine = sorted(c for c in calls if c[3] == lcn)
+        if not mine:
+            continue
+        lines = ["Build Version: AW synthetic\n"]
+        for c_off, tg, src, _, cslot, dur in mine:
+            t0 = start + timedelta(seconds=c_off)
+            keyups.append((freq, int(t0.timestamp()), int(t0.timestamp()) + dur))
+            for k in range(dur):
+                t = t0 + timedelta(seconds=k)
+                kind = "VLC  " if k == 0 else ("TLC  " if k == dur - 1 else f"VC{1 + k % 6} ")
+                lines.append(_sync(t, cslot, cc, kind))
+                if k == 0 or k == dur - 1:
+                    lines.append(f" SLOT {cslot} TGT={tg} SRC={src} Group Call \n")
+                if k % 2 == 0:
+                    lines.append(f" SLC_P_SYS_PARMS: Large; Net ID: {net + 1}; Site ID: 1.{site + 1}; Comp CC: 0; SYS: {code:04X};\n")
+                else:
+                    h = address_hash(tg)
+                    ts1, h1, ts2, h2 = ("Group Voice", h, "Idle", 0) if cslot == 1 else ("Idle", 0, "Group Voice", h)
+                    lines.append(f" Activity Update TS1: {ts1}; Hash: {h1}; TS2: {ts2}; Hash: {h2};\n")
+        p = out_dir / f"dsd_fme_{freq}_{start.strftime('%Y%m%d_%H%M%S')}.log"
+        p.write_text("".join(lines), encoding="utf-8")
+        paths.append(p)
+    return paths, keyups
