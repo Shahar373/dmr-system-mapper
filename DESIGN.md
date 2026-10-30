@@ -721,10 +721,21 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   bytes repeat exactly and the fields are right: the Aloha carries SYS 2102 on the site-2 control
   channel, the Adjacent_Site broadcasts name site 3 on LCN 5 (as SDRTrunk showed) and site 1 on
   LCN 2. No CRC-16 variant (any polynomial, init, bit order) fits: it is a key, like RAS without
-  DSD-FME's RAS mark. A CSBK whose CRC fails is therefore trusted when its FEC passed and either
-  the same bytes came before or the stream is clearly keyed (30 CSBKs, at least 90 % failing);
-  Aloha, neighbours, channel updates and grants are then read from the bytes (`pdu_keyed_crc`
-  in the quality counters, `from_bytes` in the payloads). A burst with `(FEC ERR)` is never used.
+  DSD-FME's RAS mark. A CSBK whose CRC fails is therefore trusted from its second identical copy
+  on, never on its FEC alone: the first version did that and let single copies with flipped bits
+  through (site 1 read as site 9, SYS 2111). Aloha, neighbours, channel updates and grants are
+  then read from the bytes (`pdu_keyed_crc` in the quality counters, `from_bytes` in the
+  payloads). A burst with `(FEC ERR)` is never used. Acknowledgements, P_CLEAR/P_PROTECT and
+  random-access CSBKs are recognised and not reported. With `-Z` DSD-FME also prints voice frames
+  (`AMBE … err = [..]`), single-burst bits (`SB: …`), Cap+ multi-block dumps, and the TCP input's
+  reconnect messages when a decoder's bridge closes: all recognised, none stored.
+- **Sites from timing alone.** In the same field run a non-DMR carrier (469.1 MHz) keyed up 59
+  times, often as calls started; key-up matches gave it `probable` links to both sites, and sites
+  1 and 2 became one. Now: key-up-only `behavioral_lcn_keyup` stays under `possible` (raw ≤ 0.4)
+  and gives an LCN only with ≥ 3 consistent matches; carriers decoded 20 s without DMR, or with
+  another colour code, are never matched; and sites are built strongest link first without ever
+  joining two groups that name different sites on air. `mapper correlate --rebuild` throws the
+  automatic evidence away and collects it again (manual evidence and names stay).
   Seen in 5 minutes: Aloha (FID 0x00 and 0x10), C_BCAST, Cap Max channel updates (0x21/FID 0x10),
   data and voice grants, C_ACKD.
 - **Activity Update hash** (`rawpdu.address_hash`): CRC-8 of the 16 least significant address

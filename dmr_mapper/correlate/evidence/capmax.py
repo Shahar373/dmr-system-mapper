@@ -33,6 +33,7 @@ from ..scoring import ScoringConfig
 
 CALL_WINDOW_S = 5        # call rows are kept per minute: overlap generously
 KEYUP_WINDOW_S = 3
+KEYUP_ONLY_MAX = 0.4     # timing alone never makes a site link (× 0.70 weight: under "possible")
 PER_MATCH = 0.4
 
 
@@ -100,31 +101,48 @@ def lcn_keyup(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
         agreement = weight / sum(per_lcn.values())
         m = info[(c_id, f_id)]
         n = m["n_by_lcn"][lcn]
-        ev = Evidence(c.freq_hz, f.freq_hz, "same_site", "behavioral_lcn_keyup", round(_saturating(n) * agreement, 4),
+        raw = _saturating(n) * agreement
+        if not m["calls"]:
+            # key-ups only: another system's carrier in the slice keys up at such moments too (in the
+            # field a non-DMR carrier at 469.1 MHz did, often): a hint, never a site link or an LCN alone
+            raw = min(raw, KEYUP_ONLY_MAX)
+        ev = Evidence(c.freq_hz, f.freq_hz, "same_site", "behavioral_lcn_keyup", round(raw, 4),
                       m["newest"], m["first"], m["count"],
                       {"control": c.freq_hz, "carrier": f.freq_hz, "lcn": lcn, "matches": round(n, 2), "agreement": round(agreement, 2),
-                       "other_lcns": sorted(k for k in per_lcn if k != lcn), "examples": m["examples"][:5]}).ordered()
-        ev.lcn_hints[f.freq_hz] = lcn
+                       "by_call": m["calls"], "other_lcns": sorted(k for k in per_lcn if k != lcn), "examples": m["examples"][:5]}).ordered()
+        if m["calls"] or (n >= 3 and agreement >= 0.8):
+            ev.lcn_hints[f.freq_hz] = lcn
         out.append(ev)
     return out
 
 
 def _vote(votes, info, c_id: int, f_id: int, lcn: int, weight: float, example: dict) -> None:
     votes[(c_id, f_id)][lcn] += weight
-    m = info.setdefault((c_id, f_id), {"n_by_lcn": defaultdict(float), "count": 0, "newest": 0, "first": example["ts"], "examples": []})
+    m = info.setdefault((c_id, f_id), {"n_by_lcn": defaultdict(float), "count": 0, "calls": 0, "newest": 0, "first": example["ts"],
+                                        "examples": []})
     m["n_by_lcn"][lcn] += weight
     m["count"] += 1
+    m["calls"] += int(example["by"] == "call")
     m["newest"] = max(m["newest"], int(example["ts"]))
     m["first"] = min(m["first"], int(example["ts"]))
     if len(m["examples"]) < 5:
         m["examples"].append(example)
 
 
+def _not_dmr(ctx: Context) -> set[int]:
+    """Carriers a decoder listened to for 20 s of key-ups or more without hearing DMR."""
+    return {int(r["id"]) for r in ctx.store.rows(
+        "SELECT c.id FROM carriers c WHERE (SELECT COALESCE(SUM(bursts), 0) FROM observations o WHERE o.carrier_id = c.id) < 20"
+        " AND (SELECT COALESCE(SUM(k.end - k.start), 0) FROM keyups k WHERE k.carrier_id = c.id AND k.decoded = 1) >= 20")}
+
+
 def _may_belong(ctx: Context, control, f_id: int) -> bool:
-    """Carrier ``f_id`` could be a traffic channel of ``control``'s site: not known to be another
-    site or network, not another variant, and not far away in frequency."""
+    """Carrier ``f_id`` could be a traffic channel of ``control``'s site: DMR, not known to be another
+    site or network, not another variant or colour code, and not far away in frequency."""
     f = ctx.carriers.get(f_id)
-    if f is None or f.variant not in ("tier3", "unknown", "tier2"):
+    if f is None or f.variant not in ("tier3", "unknown", "tier2") or f_id in ctx.cache("not_dmr", _not_dmr):
+        return False
+    if control.cc is not None and f.cc is not None and f.cc != control.cc:
         return False
     if abs(f.freq_hz - control.freq_hz) > 10_000_000:
         return False

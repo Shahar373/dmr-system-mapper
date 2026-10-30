@@ -36,15 +36,9 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
         "SELECT l.*, a.freq_hz AS a_freq, b.freq_hz AS b_freq FROM links l JOIN carriers a ON a.id = l.a_carrier_id"
         " JOIN carriers b ON b.id = l.b_carrier_id WHERE l.score >= ?", (thr,))
 
-    g_site = nx.Graph()
-    g_site.add_nodes_from(ctx.carriers)
-    for l in links:
-        if l["kind"] == "same_site":
-            g_site.add_edge(int(l["a_carrier_id"]), int(l["b_carrier_id"]), score=float(l["score"]))
-
     site_of: dict[int, int] = {}           # carrier id → site index
     site_members: list[list[int]] = []
-    for comp in nx.connected_components(g_site):
+    for comp in _site_components(ctx, links):
         idx = len(site_members)
         members = sorted(comp, key=lambda cid: ctx.carriers[cid].freq_hz)
         site_members.append(members)
@@ -124,6 +118,49 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
             known_numbers.add(number)
     apply_names(store)
     return int(store.scalar("SELECT COUNT(*) FROM sites")), len(system_members)
+
+
+def _site_keys(ctx: Context, c: CarrierInfo) -> dict[str, Any]:
+    """What a carrier says on air about its own site, per variant."""
+    keys: dict[str, Any] = {}
+    t3 = ctx.t3_identity(c)
+    if t3 is not None:
+        keys["tier3"] = (t3[1], t3[2])
+    if (cap := ctx.primary_cap_site(c)) is not None:
+        keys["capplus"] = (cap, c.cc)
+    if (con := ctx.primary_con_site(c)) is not None:
+        keys["conplus"] = con
+    if c.xpt_sites:
+        keys["xpt"] = min(c.xpt_sites)
+    return keys
+
+
+def _site_components(ctx: Context, links) -> list[set[int]]:
+    """Connected components of ``same_site`` links, built strongest link first, except that two
+    groups that name different sites on air are never joined: in the field a carrier linked to
+    both sites by timing alone would otherwise have made sites 1 and 2 one."""
+    parent = {cid: cid for cid in ctx.carriers}
+    keys = {cid: _site_keys(ctx, c) for cid, c in ctx.carriers.items()}
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    for l in sorted((l for l in links if l["kind"] == "same_site"), key=lambda l: -float(l["score"])):
+        a, b = find(int(l["a_carrier_id"])), find(int(l["b_carrier_id"]))
+        if a == b:
+            continue
+        ka, kb = keys[a], keys[b]
+        if any(v in kb and kb[v] != k for v, k in ka.items()):
+            continue
+        parent[b] = a
+        keys[a] = {**kb, **ka}
+    comps: dict[int, set[int]] = defaultdict(set)
+    for cid in ctx.carriers:
+        comps[find(cid)].add(cid)
+    return list(comps.values())
 
 
 def _system_identity(ctx: Context, cids: list[int]) -> tuple[str, str | None, int | None]:

@@ -15,8 +15,8 @@ of it DSD-FME has already printed as text. What it does not print is read here, 
 * Aloha, Adjacent_Site / Vote_Now and channel grants when DSD-FME printed nothing for them. On the
   469 MHz Capacity Max network (field log 2026-10-31) every CSBK fails DSD-FME's CRC although the
   same bytes repeat exactly and their fields are right (Aloha SYS 2102 on the site-2 control
-  channel, neighbour site 3 on LCN 5 as SDRTrunk showed): the CRC is keyed, not damaged. See
-  ``dsdfme.LineParser._raw_pdu`` for when such a CSBK is trusted.
+  channel, neighbour site 3 on LCN 5 as SDRTrunk showed): the CRC is keyed, not damaged. Such a
+  CSBK is trusted only from its second identical copy on (``dsdfme.LineParser._raw_pdu``).
 
 Nothing here touches samples or symbols: it is bookkeeping on bytes DSD-FME already decoded, and
 a CSBK is only used when its own CRC checks out.

@@ -107,3 +107,47 @@ def test_one_long_call_is_one_match_and_minute_marks_are_not_calls(tmp_path, sto
     link = _link(links, T7, CC_A, "same_site")
     ev = next(e for e in explain(store, link["id"], cfg, now=NOW)["evidence"] if e["type"] == "behavioral_lcn_keyup")
     assert ev["details"]["matches"] == 1 and ev["details"]["lcn"] == 7
+
+
+def test_a_carrier_that_only_keys_up_at_the_right_moments_joins_no_site(capmax_store, cfg):
+    """Field run: 469.1 MHz (no DMR in 80 s of decoding) keyed up 59 times, often as calls started.
+    Timing alone gave it 'probable' links to both sites and made sites 1 and 2 one."""
+    store = capmax_store
+    rows = store.rows("SELECT ts FROM csbk_events WHERE kind = 'capmax_channel_update'")
+    stray = store.upsert_carrier(469_100_000, NOW - 3000)
+    other_cc = store.upsert_carrier(469_025_000, NOW - 3000)
+    store.conn.execute("UPDATE carriers SET dominant_cc = 9, variant = 'tier2' WHERE id = ?", (other_cc,))
+    for r in rows:
+        for cid in (stray, other_cc):
+            store.conn.execute("INSERT INTO keyups (carrier_id, session_id, start, end, decoded) VALUES (?, 1, ?, ?, 1)",
+                               (cid, r["ts"] + 1, r["ts"] + 9))
+    store.commit()
+    run(store, cfg, now=NOW, rebuild=True)
+    links = _links(store)
+    for key, link in links.items():
+        if 469_100_000 in key[:2] or 469_025_000 in key[:2]:
+            assert link["label"] == "weak", (key, link)
+    lcns = {int(r["freq_hz"]): r["lcn"] for r in store.rows(
+        "SELECT c.freq_hz, cs.lcn FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id")}
+    assert lcns[469_100_000] is None and lcns[469_025_000] is None
+    site_of = {int(r["freq_hz"]): r["site_id"] for r in store.rows(
+        "SELECT c.freq_hz, cs.site_id FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id")}
+    assert site_of[CC_A] != site_of[CC_B]
+
+
+def test_sites_that_name_different_sites_are_never_merged(store, cfg):
+    from test_watch import _tier3
+
+    a = _tier3(store, 469_350_000, "slc_c_sys_parms", sub=2)       # site 1
+    b = _tier3(store, 469_650_000, "slc_c_sys_parms", sub=3)       # site 2
+    mid = store.upsert_carrier(469_500_000, NOW - 600)
+    for cid in (a, b, mid):
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+    store.commit()
+    from dmr_mapper.correlate import propose
+    propose(store, 469_350_000, 469_500_000, "same_site", 0.9, "test", cfg, now=NOW)
+    propose(store, 469_650_000, 469_500_000, "same_site", 0.8, "test", cfg, now=NOW)
+    run(store, cfg, now=NOW)
+    site_of = {int(r["freq_hz"]): r["site_id"] for r in store.rows(
+        "SELECT c.freq_hz, cs.site_id FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id")}
+    assert site_of[469_500_000] == site_of[469_350_000] != site_of[469_650_000]   # the stronger link wins

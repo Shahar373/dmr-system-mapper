@@ -189,3 +189,30 @@ def test_a_crc_failure_with_fec_errors_or_seen_once_is_not_trusted():
     assert _structural(_parse(once * 2), "capmax_channel_update")                         # repeated: trusted
     fec = "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (FEC ERR)\n" + bad
     assert not _structural(_parse(fec * 3), "capmax_channel_update")
+
+
+def test_a_single_corrupted_copy_is_never_used_however_keyed_the_stream():
+    """Field run: after hundreds of clean keyed-CRC CSBKs, one copy with a flipped bit named a site
+    9 that does not exist. Only payloads seen twice are used."""
+    n_code, code = large_syscode(1, 1), large_syscode(1, 2)
+    good = csbk_pdu(40, 0x10, [(16, 5, 6), (21, 14, n_code), (40, 14, code), (68, 12, 2)]).rsplit("[", 2)[0] + "[00][00]\n"
+    flipped = csbk_pdu(40, 0x10, [(16, 5, 6), (21, 14, large_syscode(1, 9)), (40, 14, code), (68, 12, 2)]).rsplit("[", 2)[0] + "[00][00]\n"
+    burst = "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (CRC ERR)\n"
+    evs = _parse((burst + good) * 60 + burst + flipped)
+    sites = {e.payload["adj_sub_site"] - 1 for e in _structural(evs, "tier3_bcast")}
+    assert sites == {1}
+
+
+def test_payload_and_tcp_noise_is_recognised():
+    text = (" TCP Direct Link: 127.0.0.1:7356\n TCP Connection Success!\n"
+            "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | VC2\n"
+            " AMBE F801A99F8CE080 err = [0] [0]\n SB: 00000000000 - 000;\n CAP+ Multi Block PDU\n"
+            " [BE][10][A3][00][00][80][C0][FA][FA][FA][FA][00][00][00][00][00][00]\n"
+            " Connection to TCP Server Interrupted. Trying again in 3 seconds.\n ERROR opening socket\n"
+            "12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (CRC ERR)\n"
+            " DMR PDU Payload [A0][00][05][C0][00][00][E5][00][00][FF][CF][7F]\n"
+            "12:00:01 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (CRC ERR)\n"
+            " DMR PDU Payload [A0][00][05][C0][00][00][E5][00][00][FF][CF][7F]\n")
+    evs = _parse(text)
+    assert not any(isinstance(e, Unrecognized) for e in evs)
+    assert all(r.understood for r in evs if isinstance(r, RawOpcode))      # an acknowledgement: known, not used

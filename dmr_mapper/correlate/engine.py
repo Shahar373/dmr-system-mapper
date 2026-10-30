@@ -48,9 +48,16 @@ def score_link(store: Store, link_id: int, cfg: ScoringConfig, now: int) -> dict
     return {"score": ls.score, "label": ls.label, "tier2_only": ls.tier2_only}
 
 
-def run(store: Store, config: dict[str, Any] | None, now: int | None = None, window_days: int | None = None) -> CorrelateReport:
+def run(store: Store, config: dict[str, Any] | None, now: int | None = None, window_days: int | None = None,
+        rebuild: bool = False) -> CorrelateReport:
+    """With ``rebuild`` the automatic evidence is thrown away and collected again from what is
+    stored now (after a parser fix, so wrong evidence does not linger until it decays); manual
+    evidence and names stay."""
     cfg = ScoringConfig(config)
     now = int(now if now is not None else time.time())
+    if rebuild:
+        store.conn.execute("DELETE FROM evidence WHERE source = 'auto'")
+        store.conn.execute("DELETE FROM links WHERE id NOT IN (SELECT link_id FROM evidence)")
     window = int(window_days or cfg.window_days)
     ctx = Context(store, now, window)
     report = CorrelateReport(now=now, window_days=window, carriers=len(ctx.carriers))

@@ -157,6 +157,15 @@ META_RE = re.compile(
     r"\d{2}:\d{2}:\d{2}\s+P25|[█╚╔║╗╝═]+|Usage: dsd-fme|Decoding Mode:|Using .* as input|Frequency: .* Hz|Gain: |Squelch: )"
 )
 UNKNOWN_CSBK_RE = re.compile(r"Unknown CSBK|CSBK Opcode|MFID: |Opcode: ")
+# with -Z: voice frames, single-burst / reverse-channel bits, Cap+ multi-block dumps; and what the TCP
+# input prints when the bridge goes away (the collector closes it to stop a decoder)
+PAYLOAD_NOISE_RE = re.compile(
+    r"^(?:AMBE [0-9A-F]{14} err = \[\d+\] \[\d+\]|(?:SB|RC): [01]{11} - [0-9A-F]{3};|CAP\+ Multi Block PDU|(?:\[[0-9A-F]{2}\]){8,}$)")
+TCP_INPUT_RE = re.compile(
+    r"^(?:TCP Direct Link: |TCP Connection Success|TCP Socket Connection Error|ERROR opening socket|Connection to TCP Server (?:Interrupted|Disconnected)"
+    r"|Logging Frame Payload to console|DMRLA n value set to)")
+# standard CSBKs this mapper has no use for (acknowledgements, payload-channel clear/protect, random access)
+UNUSED_OPCODES = {0x1D, 0x1E, 0x1F, 0x20, 0x21, 0x22, 0x23, 0x2E, 0x2F}
 
 # Short-LC lines (decoded from the CACH of any burst)
 _SLC_PREFIXES = ("SLCO", "SLC_", "Activity Update")
@@ -303,6 +312,9 @@ class LineParser:
         if self._ts is None:
             # Nothing can be timestamped before the first Sync line: keep the DSD-FME header as
             # metadata, report anything else (a stream that started mid-record) as unrecognized.
+            if TCP_INPUT_RE.match(stripped):
+                self.parsed += 1
+                return
             if mm := META_RE.match(stripped):
                 self.parsed += 1
                 key = next((k for k, v in mm.groupdict().items() if v is not None), "banner")
@@ -630,6 +642,8 @@ class LineParser:
         if ERR_LINE_RE.search(s):
             yield Quality(self._ts, "crc_err")
             return True
+        if PAYLOAD_NOISE_RE.match(s) or TCP_INPUT_RE.match(s):
+            return True
         if m := META_RE.match(s):
             key = next((k for k, v in m.groupdict().items() if v is not None), "banner")
             yield Meta(self._ts, key, (m.groupdict().get(key) or s)[:200])
@@ -685,13 +699,14 @@ class LineParser:
             if self._ras and not self._burst_crc_err:
                 # a RAS system: the CRC carries a MAC, so DSD-FME decodes on its FEC alone, and so do we
                 yield Quality(self._ts, "pdu_ras")
-            elif self._keyed_crc() or b in self._bad_crc_seen:
-                # a keyed CRC (Capacity Max at 469 MHz): the FEC corrected the bits, and the stream
-                # shows its CRCs are never right, or these very bytes came before
+            elif b in self._bad_crc_seen:
+                # a keyed CRC (Capacity Max at 469 MHz): these very bytes came before. The FEC alone
+                # is not enough: in the field it let through single copies with flipped bits (site 1
+                # read as site 9), but the same wrong bits twice do not happen
                 yield Quality(self._ts, "pdu_keyed_crc")
             else:
                 self._bad_crc_seen[b] = None
-                if len(self._bad_crc_seen) > 512:
+                if len(self._bad_crc_seen) > 4096:
                     del self._bad_crc_seen[next(iter(self._bad_crc_seen))]
                 yield Quality(self._ts, "pdu_crc_err")
                 return
@@ -720,14 +735,11 @@ class LineParser:
                 ids = [("tg", u["tg"], "tgt")] if d["mode"] == "open" else []
                 yield self._event("capmax_channel_update", {"mode": d["mode"], "lcn": u["lcn"], "slot": u["slot"], "tg": u["tg"]}, ids)
             yield RawOpcode(self._ts, key, True, "")
-        elif self._lines_since_burst == 0 and not d["pf"]:
+        elif self._lines_since_burst == 0 and not d["pf"] and not (d["fid"] == 0 and d["opcode"] in UNUSED_OPCODES):
             # DSD-FME printed nothing for this CSBK and it is not one read here either
             yield RawOpcode(self._ts, key, False, " ".join(f"{x:02X}" for x in b))
         else:
             yield RawOpcode(self._ts, key, True, "")
-
-    def _keyed_crc(self) -> bool:
-        return self._csbk_n >= 30 and self._csbk_bad_crc >= 0.9 * self._csbk_n
 
     def _from_bytes(self, d: dict[str, Any]) -> Iterator[Event]:
         if d["kind"] == "aloha":

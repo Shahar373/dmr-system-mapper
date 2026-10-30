@@ -91,7 +91,7 @@ def cmd_correlate(args: argparse.Namespace) -> int:
 
     cfg = load_config(args.config)
     with _open_store(args, cfg) as store:
-        rep = run(store, cfg, now=_parse_now(args.now), window_days=args.window_days)
+        rep = run(store, cfg, now=_parse_now(args.now), window_days=args.window_days, rebuild=args.rebuild)
     if args.json:
         print(json.dumps(rep.to_dict(), indent=2))
         return 0
@@ -550,6 +550,7 @@ def build_parser() -> argparse.ArgumentParser:
     co = sub.add_parser("correlate", help="run the evidence engine and derive sites/systems")
     co.add_argument("--window-days", type=int, help="look back this many days (default: correlator.window_days)")
     co.add_argument("--now", help="pretend it is this ISO time (for replaying old captures)")
+    co.add_argument("--rebuild", action="store_true", help="forget the automatic evidence and collect it again (manual evidence and names stay)")
     co.add_argument("--json", action="store_true")
     co.set_defaults(func=cmd_correlate)
 

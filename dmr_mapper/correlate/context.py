@@ -145,6 +145,13 @@ class Context:
         codes = sys_for.get((net, site))
         return (max(codes, key=codes.get) if codes else None, net, site)
 
+    def cache(self, key: str, make):
+        """A value computed once per run (``make(self)``), shared by the collectors."""
+        store = self.__dict__.setdefault("_cache", {})
+        if key not in store:
+            store[key] = make(self)
+        return store[key]
+
     def announced_channel(self, net: int | None, site: int) -> int | None:
         """The LPCN (on Capacity Max: the LCN) neighbours announce for a site's control channel."""
         for c in self.carriers.values():
