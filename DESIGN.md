@@ -387,7 +387,7 @@ belong to a **class** that carries the config weight and decay constant.
 | `explicit_neighbor` | explicit | 0.90 | 1.0 if both sites announce each other, 0.65 one-way | `neighbor_site` (between carriers mapped to those sites) | Linked Cap+ `Adjacent Sites`, Con+ `Adjacent Sites`, Tier III `Adjacent_Site`, XPT adjacent |
 | `explicit_lcn_freq` | explicit | 0.95 | 1.0 | `same_site` | Tier III `Chan_Freq` / grants with absolute frequency naming this carrier |
 | `explicit_same_site` | explicit | 0.70 | 1.0 if same site number **and** same system code/net, 0.85 when one side (a Tier III traffic channel) only knows Net/Site, 0.8 if same site number and same CC only (Cap+ has no system code), 0.9 for a shared XPT site | `same_site` | Cap+ `SLCO Site`, Con+ `Net/Site`, Tier III sys parms, XPT site |
-| `explicit_same_system` | explicit | 0.80 | 1.0 | `same_system` | same Tier III `SYS` code or Con+ Net ID on different sites |
+| `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 2 site 1.2 = `2101`, site 1.3 = `2102`); Con+: same Net ID |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
 | `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
 | `identity_radio` | identity | 0.30 | `min(1, shared_radios / 5)` | `same_system` | the same radio ID seen as `src` on both carriers within 24 h |
@@ -468,7 +468,7 @@ parser. Summary of what the correlator can use:
 | Tier II | — (CC + `Activity Update` hash pattern is a weak fingerprint) | — | — | — |
 | Cap+ | `SLCO Capacity Plus Site: n` | — (site numbers are per-network; Linked Cap+ neighbours tie them) | `Capacity Plus Adjacent Sites` | LSN 1–16 per site, learned from rest hops; `LCN = (LSN+1)//2`, `slot = (LSN−1)%2+1` |
 | Con+ | `Site ID` | `Net ID` | `Connect Plus Adjacent Sites` | LCN from grants; frequency only via observation |
-| Tier III | `Site ID` (+ sub-site; `-D 0` shows full ID) | `SYS` code, `Net ID` | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
+| Tier III | `Site ID` + sub-site (Large model prints `1.3`; stored as site×100+sub) | `Net ID` + model (the `SYS` code changes with the site) | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
 | XPT | `XPT Adjacent Site:n` | — | `XPT Adjacent` | `Free LCN`, LSN status list |
 
 Phase 1 result on `samples/`: 0 unrecognized lines on all 16 logs; the Cap+ capture yields 9 245
@@ -624,6 +624,12 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   `Site: 2`. `explicit_same_site` for Cap+ therefore requires the same colour code and a
   frequency distance below `survey.same_site_max_span_hz` (default 5 MHz), and reaches
   `confirmed` only together with behavioural or Linked Cap+ neighbour evidence.
+- **Stray Capacity Plus lines on Tier III carriers.** On the Pi, DSD-FME printed
+  `SLCO Capacity Plus Site: 0 - Rest LSN: 0` on Cap Max carriers. Cap+ site numbers and Cap+
+  neighbours count only on carriers classified as Cap+.
+- **Carriers without DMR** (analogue, another protocol, too weak) stay in `carriers` with variant
+  `unknown`; after 30 s of decoding with no DMR the scheduler leaves them out of a round until they
+  are stale.
 - **Tier III channel numbering** without `Chan_Freq` needs a band plan (`survey.tier3_bandplans`)
   to convert LPCN to frequency; absent that, LPCN is stored and the link stays at `possible`.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded

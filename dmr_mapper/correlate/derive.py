@@ -19,7 +19,7 @@ from typing import Any
 import networkx as nx
 
 from ..db import Store
-from .context import CarrierInfo, Context
+from .context import CarrierInfo, Context, format_site
 from .scoring import ScoringConfig
 
 
@@ -111,29 +111,35 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
                 continue
             store.conn.execute(
                 "INSERT OR IGNORE INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen) VALUES (?, ?, ?, NULL, 0, ?, ?)",
-                (sys_id, number, f"site {number}", now, now))
+                (sys_id, number, f"site {format_site(number) if v == 'tier3' else number}", now, now))
             known_numbers.add(number)
     return int(store.scalar("SELECT COUNT(*) FROM sites")), len(system_members)
 
 
 def _system_identity(ctx: Context, cids: list[int]) -> tuple[str, str | None, int | None]:
     variants = defaultdict(int)
-    sys_code = net_id = None
+    net_id = None
+    codes: set[str] = set()
     for cid in cids:
         c = ctx.carriers[cid]
         variants[c.variant] += 1
         ident = ctx.t3_identity(c)
         if ident is not None:
-            sys_code = sys_code or ident[0]
+            codes.update(k[0] for k in c.t3_sites if k[0])
             net_id = net_id if net_id is not None else ident[1]
         con = ctx.primary_con_site(c)
         if con is not None and net_id is None:
             net_id = con[0]
     variant = max(variants, key=variants.get) if variants else "unknown"
+    # the SYS code differs per site, so a multi-site network stores all of them
+    sys_code = ",".join(sorted(codes)) if codes else None
     return variant, sys_code, net_id
 
 
 def _system_label(ctx: Context, cids: list[int], variant: str, sys_code: str | None, net_id: int | None) -> str:
+    if variant == "tier3" and net_id is not None:
+        models = {ctx.t3_model(ctx.carriers[c]) for c in cids} - {None}
+        return f"Tier III net {net_id}" + (f" ({'/'.join(sorted(models))})" if models else "")
     if sys_code:
         return f"Tier III SYS {sys_code}"
     if variant == "conplus" and net_id is not None:
@@ -168,7 +174,8 @@ def _site_identity(ctx: Context, cids: list[int]) -> tuple[int | None, int | Non
 
 def _site_label(ctx: Context, cids: list[int], variant: str, site_number: int | None) -> str:
     freqs = sorted(ctx.carriers[c].freq_hz for c in cids)
-    base = f"site {site_number}" if site_number is not None else "site"
+    shown = format_site(site_number) if variant == "tier3" else site_number
+    base = f"site {shown}" if site_number is not None else "site"
     if len(freqs) == 1:
         return f"{base} @ {freqs[0] / 1e6:.4f} MHz"
     return f"{base} ({len(freqs)} carriers, {freqs[0] / 1e6:.4f}-{freqs[-1] / 1e6:.4f} MHz)"

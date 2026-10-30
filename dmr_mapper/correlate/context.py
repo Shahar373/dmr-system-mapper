@@ -21,7 +21,8 @@ class CarrierInfo:
     # explicit identity seen on this carrier
     cap_sites: dict[int, int] = field(default_factory=dict)       # site number → count (Cap+)
     con_sites: dict[tuple[int, int], int] = field(default_factory=dict)   # (net, site) → count (Con+)
-    t3_sites: dict[tuple[str | None, int | None, int], int] = field(default_factory=dict)  # (sys, net, site) → count
+    t3_sites: dict[tuple[str | None, int | None, int], int] = field(default_factory=dict)  # (sys, net, site) → count; site see t3_site_number
+    t3_models: dict[str, int] = field(default_factory=dict)        # Tier III network model (Tiny/Small/Large/Huge) → count
     xpt_sites: set[int] = field(default_factory=set)
     neighbors: dict[str, set[Any]] = field(default_factory=lambda: defaultdict(set))   # variant → announced site keys
     announced_freqs: dict[int, dict[str, Any]] = field(default_factory=dict)  # freq_hz → {lpcn, sys, net, site}
@@ -35,6 +36,20 @@ class CarrierInfo:
         keys.update(("tier3", k) for k in self.t3_sites)
         keys.update(("xpt", s) for s in self.xpt_sites)
         return keys
+
+
+def t3_site_number(site_id, sub_site) -> int:
+    """One integer per Tier III site. DSD-FME prints Large/Huge-model sites as "site.sub" (1.3);
+    both parts identify the site, so they are kept as site*100 + sub (see ``format_site``)."""
+    site = int(site_id)
+    return site * 100 + int(sub_site) if sub_site is not None else site
+
+
+def format_site(number) -> str:
+    if number is None:
+        return "?"
+    n = int(number)
+    return f"{n // 100}.{n % 100}" if n >= 100 else str(n)
 
 
 class Context:
@@ -79,11 +94,13 @@ class Context:
                 for s in p.get("sites", []):
                     c.neighbors["conplus"].add(int(s))
             elif kind == "tier3_sys_parms":
-                key = (p.get("sys_code"), p.get("net_id"), int(p["site_id"]))
+                key = (p.get("sys_code"), p.get("net_id"), t3_site_number(p.get("site_id"), p.get("sub_site")))
                 c.t3_sites[key] = c.t3_sites.get(key, 0) + n
+                if p.get("model"):
+                    c.t3_models[str(p["model"])] = c.t3_models.get(str(p["model"]), 0) + n
             elif kind == "tier3_bcast":
                 if p.get("a_type") == "adjacent_site" and p.get("adj_site_id") is not None:
-                    c.neighbors["tier3"].add((p.get("sys_code"), p.get("adj_net_id"), int(p["adj_site_id"])))
+                    c.neighbors["tier3"].add((p.get("sys_code"), p.get("adj_net_id"), t3_site_number(p["adj_site_id"], p.get("adj_sub_site"))))
                 if p.get("a_type") == "chan_freq" and p.get("rx_freq_hz"):
                     c.announced_freqs[int(p["rx_freq_hz"])] = {"lpcn": p.get("apcn") or p.get("lpcn"), "sys": p.get("sys_code")}
             elif kind == "xpt_adjacent":
@@ -92,7 +109,18 @@ class Context:
             elif kind == "grant" and p.get("freq_hz"):
                 c.announced_freqs[int(p["freq_hz"])] = {"lpcn": p.get("lpcn"), "lcn": p.get("lcn"), "sys": None}
 
+        # A carrier that is not Capacity Plus can still print an occasional "Capacity Plus Site"
+        # line: on the Pi, Cap Max (Tier III) short LCs were decoded as "Site: 0 - Rest LSN: 0".
+        # Cap+ identity counts only on carriers classified as Cap+.
+        for c in self.carriers.values():
+            if c.variant != "capplus":
+                c.cap_sites.clear()
+                c.neighbors.pop("capplus", None)
+
     # -- helpers ---------------------------------------------------------------------------------
+    def t3_model(self, c: CarrierInfo) -> str | None:
+        return max(c.t3_models, key=c.t3_models.get) if c.t3_models else None
+
     def t3_identity(self, c: CarrierInfo) -> tuple[str | None, int | None, int] | None:
         """(sys_code, net_id, site_id) of a Tier III carrier. Traffic channels only carry Net/Site
         in their short LC, so the system code is taken from any record on the carrier that has it."""
@@ -128,7 +156,7 @@ class Context:
                 out.append(c)
             elif variant == "tier3":
                 ident = self.t3_identity(c)
-                if ident is not None and (ident == key or (ident[2] == key[2] and ident[0] == key[0])):
+                if ident is not None and ident[2] == key[2] and (ident[1] is None or key[1] is None or ident[1] == key[1]):
                     out.append(c)
             elif variant == "xpt" and key in c.xpt_sites:
                 out.append(c)

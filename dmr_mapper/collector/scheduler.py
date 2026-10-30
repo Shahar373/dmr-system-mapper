@@ -29,6 +29,8 @@ class Target:
     t3_sys: str | None = None
     last_decoded: int | None = None
     decode_seconds: float = 0.0
+    bursts: int = 0
+    events: int = 0                     # structural DMR messages ever decoded: one is proof of DMR
     score: float = 0.0
     reasons: list[str] = field(default_factory=list)
 
@@ -76,11 +78,18 @@ def targets_from_store(store: Store, cfg: dict[str, Any], hits: list[dict[str, A
         cid = int(c["id"])
         t.last_decoded = store.scalar("SELECT MAX(finished) FROM ingest_runs WHERE carrier_id = ? AND source = 'collector'", (cid,))
         t.decode_seconds = float(store.scalar("SELECT COALESCE(SUM(seconds_observed), 0) FROM observations WHERE carrier_id = ? AND source = 'collector'", (cid,)) or 0)
+        t.bursts = int(store.scalar("SELECT COALESCE(SUM(bursts), 0) FROM observations WHERE carrier_id = ?", (cid,)) or 0)
+        t.events = int(store.scalar("SELECT COALESCE(SUM(count), 0) FROM csbk_events WHERE carrier_id = ?", (cid,)) or 0)
+        if t.last_decoded is not None and t.bursts < 20:
+            # observations exist only for buckets with lines, so a silent decode leaves no seconds:
+            # count the decode time from the ingest runs instead
+            t.decode_seconds = max(t.decode_seconds, float(store.scalar(
+                "SELECT COALESCE(SUM(finished - started), 0) FROM ingest_runs WHERE carrier_id = ? AND source = 'collector'", (cid,)) or 0))
         if t.snr_db is None:
             t.snr_db = store.scalar("SELECT MAX(snr_db_max) FROM observations WHERE carrier_id = ?", (cid,))
         for r in store.rows("SELECT kind, payload, count FROM csbk_events WHERE carrier_id = ? AND kind IN ('capplus_site', 'tier3_sys_parms') ORDER BY count DESC", (cid,)):
             p = json.loads(r["payload"])
-            if r["kind"] == "capplus_site" and t.cap_site is None:
+            if r["kind"] == "capplus_site" and t.cap_site is None and t.variant == "capplus":
                 t.cap_site = int(p["site"])
             elif r["kind"] == "tier3_sys_parms" and t.t3_sys is None and p.get("sys_code"):
                 t.t3_sys = str(p["sys_code"])
@@ -110,6 +119,11 @@ def _score(t: Target, now: int) -> None:
     if t.variant in EVIDENCE_VARIANTS:
         s += 1.0
         t.reasons.append(f"{t.variant} announces identity")
+    if t.last_decoded is not None and t.decode_seconds >= 30 and t.bursts < 20 and t.events == 0:
+        # listened to for half a minute or more without DMR: analogue, another protocol, or too
+        # weak. Revisit rarely (staleness still lifts it back over a day or two).
+        s -= 3.0
+        t.reasons.append(f"no DMR in {t.decode_seconds:.0f} s of decoding")
     if "requested" in t.reasons:
         s += 5.0
     t.score = s
@@ -120,7 +134,9 @@ def plan(targets: list[Target], cfg: dict[str, Any], max_instances: int, sample_
     fs = float(sample_rate or sdr.get("sample_rate_hz", 2_000_000))
     usable = fs * float(sdr.get("usable_fraction", 0.8))
     dwell = int((cfg.get("decode", {}) or {}).get("seconds_per_carrier", 60))
-    remaining = sorted(targets, key=lambda t: t.freq_hz)
+    # carriers that scored <= 0 (no DMR heard and not stale yet) sit this round out, unless they
+    # are all there is
+    remaining = sorted([t for t in targets if t.score > 0] or targets, key=lambda t: t.freq_hz)
     slices: list[Slice] = []
     while remaining:
         best: tuple[float, list[Target]] | None = None

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from itertools import combinations
 
-from ..context import CarrierInfo, Context
+from ..context import CarrierInfo, Context, format_site
 from ..model import Evidence
 from ..scoring import ScoringConfig
 
@@ -39,14 +39,17 @@ def same_site(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
             continue
         ta, tb = ctx.t3_identity(a), ctx.t3_identity(b)
         if ta is not None and tb is not None:
-            same_sys = _t3_same_system(ta, tb)
+            same_sys = _t3_same_system(ctx, a, b, ta, tb)
             if same_sys and ta[2] == tb[2]:
-                raw = 1.0 if (ta[0] and tb[0]) else 0.85   # one side only knows Net/Site (traffic channel)
+                # the SYS code carries the site too, so equal codes corroborate; a traffic channel
+                # whose short LC has no SYS code only knows Net/Site
+                raw = 1.0 if (ta[0] and tb[0] and ta[0] == tb[0]) else 0.85
                 out.append(_pair_ev(a, b, "same_site", "explicit_same_site", raw,
-                                    {"variant": "tier3", "sys_code": ta[0] or tb[0], "net_id": ta[1], "site_id": ta[2]}))
-            elif same_sys and ta[0] and tb[0]:
+                                    {"variant": "tier3", "sys_code": ta[0] or tb[0], "net_id": ta[1], "site": format_site(ta[2])}))
+            elif same_sys:
                 out.append(_pair_ev(a, b, "same_site", "explicit_same_site_contradiction", 0.0,
-                                    {"variant": "tier3", "sys_code": ta[0], "sites": [ta[2], tb[2]], "note": "same system, different sites"}))
+                                    {"variant": "tier3", "net_id": ta[1], "sites": [format_site(ta[2]), format_site(tb[2])],
+                                     "note": "same network, different sites"}))
             continue
         if a.xpt_sites and b.xpt_sites and a.xpt_sites & b.xpt_sites:
             site = sorted(a.xpt_sites & b.xpt_sites)[0]
@@ -59,9 +62,15 @@ def same_system(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
     out: list[Evidence] = []
     for a, b in combinations(list(ctx.carriers.values()), 2):
         ta, tb = ctx.t3_identity(a), ctx.t3_identity(b)
-        if ta is not None and tb is not None and _t3_same_system(ta, tb) and ta[2] != tb[2]:
-            out.append(_pair_ev(a, b, "same_system", "explicit_same_system", 1.0,
-                                {"variant": "tier3", "sys_code": ta[0], "sites": sorted({ta[2], tb[2]})}))
+        if ta is not None and tb is not None and _t3_same_system(ctx, a, b, ta, tb) and ta[2] != tb[2]:
+            # Net IDs are small numbers that unrelated operators may reuse: on their own they make a
+            # link "probable"; a neighbour announcement between the sites makes it certain.
+            linked = _announces(a, "tier3", tb) or _announces(b, "tier3", ta)
+            out.append(_pair_ev(a, b, "same_system", "explicit_same_system", 1.0 if linked else 0.8,
+                                {"variant": "tier3", "net_id": ta[1], "model": ctx.t3_model(a) or ctx.t3_model(b),
+                                 "sites": sorted({format_site(ta[2]), format_site(tb[2])}),
+                                 "sys_codes": sorted({x for x in (ta[0], tb[0]) if x}),
+                                 "note": "same network ID" + (", sites announce each other" if linked else "")}))
             continue
         ca, cb = ctx.primary_con_site(a), ctx.primary_con_site(b)
         if ca is not None and cb is not None and ca[0] == cb[0] and ca[1] != cb[1]:
@@ -116,11 +125,14 @@ def lcn_freq(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
     return out
 
 
-def _t3_same_system(ta, tb) -> bool:
-    """Same Tier III system: equal SYS codes, or equal Net IDs when one side has no SYS code."""
-    if ta[0] and tb[0]:
-        return ta[0] == tb[0]
-    return ta[1] is not None and ta[1] == tb[1]
+def _t3_same_system(ctx: Context, a: CarrierInfo, b: CarrierInfo, ta, tb) -> bool:
+    """Same Tier III network: same Net ID and the same network model. The SYS code is NOT a
+    network identity: it also encodes the site (on the Pi, net 2 site 1.2 sends 2101 and
+    site 1.3 sends 2102)."""
+    if ta[1] is None or ta[1] != tb[1]:
+        return False
+    ma, mb = ctx.t3_model(a), ctx.t3_model(b)
+    return ma is None or mb is None or ma == mb
 
 
 def _site_key(ctx: Context, c: CarrierInfo, variant: str):
@@ -140,7 +152,7 @@ def _site_key(ctx: Context, c: CarrierInfo, variant: str):
 def _announces(c: CarrierInfo, variant: str, key) -> bool:
     announced = c.neighbors.get(variant, set())
     if variant == "tier3":
-        return any(k[2] == key[2] and (k[0] is None or key[0] is None or k[0] == key[0]) for k in announced)
+        return any(k[2] == key[2] and (k[1] is None or key[1] is None or k[1] == key[1]) for k in announced)
     return key in announced
 
 

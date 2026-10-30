@@ -191,3 +191,22 @@ def test_file_backend_replay(tmp_path, cfg):
     fs.close()
     c["sdr"]["replay"]["path"] = str(tmp_path / "missing.cf32")
     assert FileBackend(c).probe().status == "absent"
+
+
+def test_scheduler_skips_carriers_with_no_dmr_and_stray_capplus_sites(store, cfg):
+    now = int(time.time())
+    silent = store.upsert_carrier(421_162_500, now)
+    run = store.start_ingest_run("collector", None, silent, now - 400, None)
+    store.finish_ingest_run(run, now - 300, 3, 3, {})            # 100 s of decoding, nothing heard
+    t3 = store.upsert_carrier(469_062_500, now)
+    store.conn.execute("UPDATE carriers SET variant = 'tier3', dominant_cc = 1 WHERE id = ?", (t3,))
+    store.add_csbk_event(t3, now, 1, 1, "capplus_site", {"site": 0, "rest_lsn": 0, "rs": "00"}, "0")
+    hits = [{"freq_hz": 421_162_500, "snr_db": 20}, {"freq_hz": 469_062_500, "snr_db": 20}]
+    by = {t.freq_hz: t for t in targets_from_store(store, cfg, hits, now)}
+    assert by[421_162_500].score <= 0 and any("no DMR" in r for r in by[421_162_500].reasons)
+    assert by[469_062_500].cap_site is None                     # a Cap+ line on a Tier III carrier is not a Cap+ site
+    planned = {t.freq_hz for s in plan(list(by.values()), cfg, 2) for t in s.targets}
+    assert planned == {469_062_500}
+    # asked for by frequency, it is decoded anyway
+    only = targets_from_store(store, cfg, hits, now, only_freqs=[421_162_500])
+    assert {t.freq_hz for s in plan(only, cfg, 2) for t in s.targets} == {421_162_500}
