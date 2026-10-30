@@ -53,6 +53,8 @@ class Daemon:
         dcfg = cfg.get("daemon", {}) or {}
         self.tick_s = float(dcfg.get("tick_s", 1))
         self.probe_interval_s = float(dcfg.get("sdr_probe_interval_s", 30))
+        self.full_probe_interval_s = float(dcfg.get("sdr_full_probe_interval_s", 600))
+        self._last_full_probe = float("-inf")
         self.pid = os.getpid()
         self.started = int(time.time())
         self.stop_event = threading.Event()
@@ -157,7 +159,7 @@ class Daemon:
                 self.mode = "idle"
                 self.progress = {}
             if now - self._last_probe >= self.probe_interval_s:
-                self.sdr = self._probe()
+                self._idle_probe(now)
                 self._last_probe = now
         for _ in range(5):
             cmd = st.take_command(self._store)
@@ -174,6 +176,26 @@ class Daemon:
             progress = dict(self.progress)
         st.write_heartbeat(self._store, self.pid, self.started, self.mode, self.session_id, self.sdr.to_dict(), self.power.to_dict(),
                            progress, self.message)
+
+    def _idle_probe(self, now: float) -> None:
+        """While idle, only look at whether the receiver is plugged in (no driver call): asking the
+        SDRplay driver every few seconds is load on a shared receiver and a syslog line each time.
+        The driver itself is asked every ``sdr_full_probe_interval_s``, when the receiver is
+        plugged in again, and always before a session."""
+        light = getattr(self.backend, "connected", None)
+        plugged = light() if callable(light) else None
+        if plugged is None or now - self._last_full_probe >= self.full_probe_interval_s or self.sdr.status in ("unknown", "error"):
+            self.sdr = self._probe()
+            self._last_full_probe = now
+        elif not plugged:
+            if self.sdr.status != "absent":
+                log.info("receiver: unplugged")
+            self.sdr = SdrStatus("absent", self.sdr.driver, self.sdr.serial, None, None, int(time.time()))
+        elif self.sdr.status == "absent":
+            self.sdr = self._probe()          # plugged in again: see what the driver says
+            self._last_full_probe = now
+        else:
+            self.sdr.checked = int(time.time())
 
     def _probe(self) -> SdrStatus:
         try:
@@ -194,7 +216,7 @@ class Daemon:
             if kind == "start_decode" and find_dsd_fme(self.cfg) is None:
                 return False, "dsd-fme not found (decode.dsd_fme_bin)"
             self.sdr = self._probe()
-            self._last_probe = time.monotonic()
+            self._last_probe = self._last_full_probe = time.monotonic()
             if self.sdr.status != "present":
                 return False, self.sdr.short() + (f" ({self.sdr.detail})" if self.sdr.detail and self.sdr.detail not in self.sdr.short() else "")
             # Open the receiver here, before reporting "started": a refusal from the driver then

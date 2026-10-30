@@ -120,3 +120,46 @@ def test_device_args_string():
     from dmr_mapper.collector.sdr import device_args_string
     assert device_args_string({"serial": "240404AF60", "driver": "sdrplay", "label": "SDRplay Dev0 RSP1B 240404AF60"}) == "driver=sdrplay,serial=240404AF60"
     assert device_args_string({"driver": "sdrplay", "serial": ""}) == "driver=sdrplay"
+
+
+def test_free_receiver_has_no_holder_even_with_other_sdr_processes(monkeypatch, cfg):
+    _fake_soapy(monkeypatch, [{"driver": "sdrplay", "serial": "240404AF60"}])
+    monkeypatch.setattr(sdrmod, "sdr_users", lambda c: ["/usr/bin/python3 app.py (pid 7)"])
+    s = SoapyBackend(cfg).probe()
+    assert s.status == "present" and s.holder is None and s.detail is None
+
+
+class CountingBackend(SyntheticBackend):
+    def __init__(self):
+        super().__init__(SyntheticSource())
+        self.full = 0
+        self.plugged = True
+
+    def probe(self):
+        self.full += 1
+        return super().probe()
+
+    def connected(self):
+        return self.plugged
+
+
+def test_idle_loop_does_not_call_the_driver_every_tick(tmp_path, cfg):
+    c = copy.deepcopy(cfg)
+    c["daemon"].update({"tick_s": 0.05, "sdr_probe_interval_s": 0.05, "sdr_full_probe_interval_s": 3600})
+    c["power"]["state_file"] = ""
+    b = CountingBackend()
+    d = Daemon(tmp_path / "i.db", c, b)
+    th = threading.Thread(target=d.run, daemon=True)
+    th.start()
+    try:
+        time.sleep(0.8)
+        assert b.full == 1 and d.sdr.status == "present"          # one driver call at start, then USB checks only
+        b.plugged = False
+        time.sleep(0.3)
+        assert d.sdr.status == "absent" and b.full == 1
+        b.plugged = True
+        time.sleep(0.3)
+        assert d.sdr.status == "present" and b.full == 2           # plugged in again: the driver is asked once
+    finally:
+        d.stop_event.set()
+        th.join(timeout=10)

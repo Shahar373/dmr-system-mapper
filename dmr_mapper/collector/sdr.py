@@ -312,17 +312,22 @@ class SoapyBackend:
             found = SoapySDR.Device.enumerate(self._args())
         except Exception as exc:  # noqa: BLE001 - driver errors are strings
             return SdrStatus("error", self.driver, None, None, f"enumerate failed: {exc}"[:200], now)
-        users = sdr_users(self.cfg)
-        holder = "; ".join(users) if users else None
         if found:
+            # offered by the driver = free. Do not look for "other SDR programs" here: any program
+            # that merely listed devices has the SDRplay library loaded, which says nothing.
             serial = str(dict(found[0]).get("serial", "")) or (self.serial or None)
-            return SdrStatus("present", self.driver, serial, holder, "another SDR program is running" if holder else None, now)
+            return SdrStatus("present", self.driver, serial, None, None, now)
         if usb_present(self.cfg):
             # plugged in, but the driver does not offer it: the SDRplay API hides a device that
-            # another program has selected
-            return SdrStatus("busy", self.driver, self.serial or None, holder,
+            # another program has selected. Name the likely holders (a best guess).
+            users = sdr_users(self.cfg)
+            return SdrStatus("busy", self.driver, self.serial or None, "; ".join(users) if users else None,
                              "connected, but the driver does not offer it: another program is using it", now)
         return SdrStatus("absent", self.driver, self.serial or None, None, None, now)
+
+    def connected(self) -> bool | None:
+        """Light check for the idle loop: is the receiver plugged in (sysfs only, no driver call)."""
+        return usb_present(self.cfg)
 
     def open(self) -> IQSource:
         """Open exactly the device the driver lists (its full argument set, as SoapySDRUtil does):
@@ -343,7 +348,7 @@ class SoapyBackend:
         raise RuntimeError(f"{last} (tried {found})")
 
 
-SDR_LIBRARIES = ("libsdrplay_api", "libsdrPlaySupport", "librtlsdr", "libairspy", "libhackrf", "libSoapySDR")
+SDR_LIBRARIES = ("libsdrplay_api", "libsdrPlaySupport", "librtlsdr", "libairspy", "libhackrf")
 SERVICE_NAMES = ("sdrplay_apiService",)
 
 
@@ -371,7 +376,7 @@ def _proc_name(pid: int) -> tuple[str, list[str]]:
 
 
 def sdr_users(cfg: dict[str, Any]) -> list[str]:
-    """Other processes that use an SDR right now. A process counts when it has an SDR driver library
+    """Other processes that may be using an SDR (a best guess, only asked when the receiver is busy). A process counts when it has an SDR driver library
     loaded (``/proc/<pid>/maps``, readable for our own user) or, for processes of other users, when
     its program or script name is in ``sdr.known_users`` (exact name, not a substring of a path).
     The SDRplay API service itself and our own process tree do not count."""

@@ -63,7 +63,8 @@ daemon:
   tick_s: 1                    # main loop period
   heartbeat_stale_s: 10        # clients call the daemon dead after this long without a heartbeat
   default_budget_min: 60       # session length on mains when the client gives none
-  sdr_probe_interval_s: 30     # how often an idle daemon checks the receiver
+  sdr_probe_interval_s: 30     # how often an idle daemon checks that the receiver is plugged in (USB only, no driver call)
+  sdr_full_probe_interval_s: 600   # how often it asks the driver whether the receiver is free (always before a session)
   survey_hits_keep_days: 14    # prune survey_hits older than this at the end of a session
   correlate_after_decode: true # run the evidence engine when a decode session ends
 
