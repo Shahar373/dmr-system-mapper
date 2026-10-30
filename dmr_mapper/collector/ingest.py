@@ -68,4 +68,6 @@ class CarrierIngest:
             "freq_hz": self.freq_hz, "lines": self.lines, "syncs": self.pos_syncs, "inverted_syncs": self.neg_syncs,
             "bursts": dict(st.bursts), "structural": dict(st.structural), "variant": st.variant,
             "variant_confidence": st.variant_confidence, "unrecognized": st.unrecognized_total, "identities": dict(st.identities),
+            "csbk_opcodes": dict(st.csbk_opcodes.most_common(12)),
+            "quality": {k: v for k, v in st.quality.items() if k.startswith("pdu_") or k in ("burst_err", "crc_err")},
         }

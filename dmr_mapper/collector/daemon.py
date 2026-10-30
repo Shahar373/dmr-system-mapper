@@ -348,6 +348,7 @@ class Daemon:
         finally:
             self._closing.set()
             if source is not None:
+                summary.setdefault("overflows", int(getattr(source, "overflows", 0) or 0))   # samples the receiver dropped
                 try:
                     source.close()
                 except Exception:  # noqa: BLE001
@@ -604,6 +605,10 @@ class Daemon:
         per: dict[str, dict[str, Any]] = {}
         totals = {"keyups": 0, "decoded": 0, "missed": 0, "blips": 0, "preempted": 0}
         timing = {"blocks": 0, "busy_s": 0.0, "max_ms": 0.0}
+        slow: list[dict[str, Any]] = []          # the slowest blocks, with where the time went
+        overflow_at: list[int] = []              # when the receiver dropped samples
+        started_at: dict[int, float] = {}
+        no_dmr: set[int] = set()                 # decoded for a while without DMR: last in line for the session
         overflows0 = int(getattr(source, "overflows", 0) or 0)
         backlog = int(AUDIO_RATE * 2 * (float(w["preroll_s"]) + 3.0))   # pre-roll + DSD-FME start-up, int16
 
@@ -629,6 +634,7 @@ class Daemon:
             decoders[f] = DecoderProcess(self.cfg, f, port, lines)
             decoders[f].start()
             chan.add_channel(f)
+            started_at[f] = time.monotonic()
             for Xh, n0h in history:                  # the moments before the key-up, oldest first
                 pcm = chan.extract(Xh, n0h, only=[f]).get(f)
                 if pcm is not None:
@@ -676,6 +682,11 @@ class Daemon:
                     "block_ms_avg": round(1000 * timing["busy_s"] / n, 1), "block_ms_max": round(timing["max_ms"], 1),
                     "block_ms_budget": round(1000 * block_s, 1)}
 
+        def syncs(f: int) -> int:
+            if f in ingests:
+                return ingests[f].pos_syncs
+            return sum(1 for line in unheard.get(f, []) if "Sync:" in line and "DMR" in line)
+
         last_flush = last_progress = last_check = time.monotonic()
         try:
             source.read(int(source.sample_rate * 0.1))   # settle after retune
@@ -684,9 +695,13 @@ class Daemon:
                 block = source.read(chan.hop)
                 t = time.time()
                 busy0 = time.monotonic()
+                ov = int(getattr(source, "overflows", 0) or 0) - overflows0
+                if ov > len(overflow_at) and len(overflow_at) < 50:
+                    overflow_at.append(int(t))
                 X, n0 = chan.transform(block)
                 history.append((X, n0))
                 started, ended = detector.update(t, chan.channel_power(X, plan.channels, float(w["channel_width_hz"])))
+                lap = {"dsp": time.monotonic() - busy0}
                 for k in ended:
                     record_keyup(k, k.freq_hz in decoded_now or k.freq_hz in servers)
                     decoded_now.discard(k.freq_hz)
@@ -697,17 +712,27 @@ class Daemon:
                 for f in to_start:
                     start_decoder(f)
                     decoded_now.add(f)
+                lap["decoders"] = time.monotonic() - busy0
                 fresh = set(to_start)
                 for f, pcm in chan.extract(X, n0, only=[f for f in servers if f not in fresh]).items():
                     servers[f].write(pcm)
+                lap["audio"] = time.monotonic() - busy0
                 drain()
+                lap["lines"] = time.monotonic() - busy0
                 if store.conn.in_transaction:
                     store.commit()
+                lap["commit"] = time.monotonic() - busy0
                 now = time.monotonic()
-                timing["blocks"] += 1
-                timing["busy_s"] += now - busy0
-                timing["max_ms"] = max(timing["max_ms"], 1000 * (now - busy0))
                 if now - last_check >= 2:
+                    # a channel decoded for 8 s without DMR (analogue, another protocol): it gives its
+                    # decoder back and is last in line for the rest of the session
+                    for f in list(servers):
+                        if f not in plan.pinned and f not in no_dmr and now - started_at.get(f, now) >= 8 and syncs(f) < 5:
+                            no_dmr.add(f)
+                            planner.priority[f] = 3
+                            planner.assigned.pop(f, None)
+                            planner.cooldown.add(f)
+                            retire(f)
                     # a pinned control channel's DSD-FME must not stay dead for the rest of a long session
                     for f in plan.pinned:
                         d = decoders.get(f)
@@ -723,6 +748,18 @@ class Daemon:
                     store.commit()
                     self._session_track += self._flush_track(store, self.session_id or 0)
                     last_flush = now
+                total = time.monotonic() - busy0
+                timing["blocks"] += 1
+                timing["busy_s"] += total
+                timing["max_ms"] = max(timing["max_ms"], 1000 * total)
+                if total > block_s and (len(slow) < 5 or total * 1000 > slow[-1]["ms"]):
+                    parts, prev = {}, 0.0
+                    for k, v in {**lap, "rest": total}.items():
+                        parts[k] = round(1000 * (v - prev), 1)
+                        prev = v
+                    slow.append({"ts": int(t), "ms": round(1000 * total, 1), **parts, "started": len(to_start), "stopped": len(to_stop)})
+                    slow.sort(key=lambda x: -x["ms"])
+                    del slow[5:]
                 if now - last_progress >= 1:
                     active = detector.active()
                     chans = [{"freq_hz": f, "snr_db": detector.snr_of(f),
@@ -750,7 +787,8 @@ class Daemon:
                         {k: r[k] for k in ("lines", "syncs", "structural", "variant", "identities")})
                 store.commit()
             finally:
-                summary["watch"] = {**totals, **load(), "restarts": restarts, "no_dmr": sorted(unheard)}
+                summary["watch"] = {**totals, **load(), "restarts": restarts, "no_dmr": sorted(set(unheard) | no_dmr),
+                                    "slow_blocks": slow, "overflow_at": overflow_at}
                 summary["carriers"] = per
 
     @staticmethod

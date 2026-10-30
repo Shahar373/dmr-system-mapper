@@ -716,9 +716,17 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   counts `untested_on_air` until a real log is added to `samples/`. A 5-minute raw log of the
   469 MHz control channels (`decode.keep_raw_logs: true`) is the next thing to check them against;
   `csbk_opcodes` in its ingest report will show which Motorola opcodes the network really sends.
-- **The field database had no CSBK from the Capacity Max control channels**, only short LCs, and
-  its numbering never switched to raw: DSD-FME decoded no Motorola Aloha or broadcast there, so
-  those CSBKs failed their CRC or were not sent as this build expects. The raw log will tell.
+- **The Capacity Max CSBK CRC is keyed** (raw log of 2026-10-31, `samples/capmax/`). Every CSBK on
+  both control channels is flagged `(CRC ERR)` and DSD-FME prints nothing for it, yet the same
+  bytes repeat exactly and the fields are right: the Aloha carries SYS 2102 on the site-2 control
+  channel, the Adjacent_Site broadcasts name site 3 on LCN 5 (as SDRTrunk showed) and site 1 on
+  LCN 2. No CRC-16 variant (any polynomial, init, bit order) fits: it is a key, like RAS without
+  DSD-FME's RAS mark. A CSBK whose CRC fails is therefore trusted when its FEC passed and either
+  the same bytes came before or the stream is clearly keyed (30 CSBKs, at least 90 % failing);
+  Aloha, neighbours, channel updates and grants are then read from the bytes (`pdu_keyed_crc`
+  in the quality counters, `from_bytes` in the payloads). A burst with `(FEC ERR)` is never used.
+  Seen in 5 minutes: Aloha (FID 0x00 and 0x10), C_BCAST, Cap Max channel updates (0x21/FID 0x10),
+  data and voice grants, C_ACKD.
 - **Activity Update hash** (`rawpdu.address_hash`): CRC-8 of the 16 least significant address
   bits, as DSD-FME computes the Hytera XPT hash; not verified on air.
 - **Advantage mode** channel updates carry 10-bit short talkgroup ids, not the ones calls show:

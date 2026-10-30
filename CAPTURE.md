@@ -177,7 +177,13 @@ Burst types seen: `CSBK`, `VLC`, `TLC`, `VC1`–`VC6`, `VC1*`, `IDLE`, `DATA`, `
  DMR PDU Payload [A1][10][00][70][00][08][36][00][00][00][xx][xx]                      (-Z; FID 0x10 opcode 0x21: TG 2102 on LCN 7, slot 1)
 ```
 Channel updates (FID 0x10, opcodes 0x21 Open Mode / 0x22 Advantage Mode) produce no text at all:
-only the `DMR PDU Payload` line. A CSBK is used only when its own CRC-16 checks out.
+only the `DMR PDU Payload` line. On the 469 MHz network every CSBK looks like this (field log ✔):
+```
+00:36:13 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (CRC ERR)
+ DMR PDU Payload [A8][00][34][20][76][84][0B][C0][00][05][D0][2E]          (Adjacent_Site: site 3 on LCN 5)
+```
+Its CRC is keyed, so DSD-FME prints nothing; the parser trusts such a CSBK when its FEC passed and
+the bytes repeat or the stream is keyed (DESIGN.md §12).
 
 **Hytera XPT**
 ```

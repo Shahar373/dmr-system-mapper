@@ -234,7 +234,7 @@ class Aggregator:
                     self._status_key = sig
                     self._status_ts = ev.ts
                 key = f"{sig}@{self._status_ts}"
-        elif ev.kind == "capmax_channel_update":
+        elif ev.kind == "capmax_channel_update" or (ev.kind == "grant" and ev.payload.get("lpcn") is not None):
             key = self._assignment(ev)
         elif ev.kind == "capplus_site":
             self._last_site = ev.payload["site"]
@@ -252,7 +252,10 @@ class Aggregator:
         channel first announced it, ``last_ts`` the last update. The correlator lines up the start
         with key-ups; a row per time window would make every window edge look like a new call."""
         p = ev.payload
-        k = (p.get("lcn"), p.get("slot"), p.get("tg"), p.get("mode"))
+        if ev.kind == "grant":       # a Tier III channel grant: the same, as the grant announces it
+            k = ("grant", p.get("lpcn"), p.get("ts"), p.get("tgt"), p.get("code"))
+        else:
+            k = (p.get("lcn"), p.get("slot"), p.get("tg"), p.get("mode"))
         open_ = self._assignments.get(k)
         if open_ is None or ev.ts - open_[1] > ASSIGNMENT_GAP_S:
             open_ = self._assignments[k] = [f"{ev.ts}|{canonical_json(dict(p))}", ev.ts]

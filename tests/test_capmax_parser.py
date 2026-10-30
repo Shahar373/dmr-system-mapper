@@ -161,3 +161,31 @@ def test_synthetic_capmax_site_ingests_cleanly(tmp_path, store, cfg):
     assert {(json.loads(r["payload"])["net_id"], json.loads(r["payload"])["sub_site"]) for r in rows} == {(2, 2)}   # one numbering
     assert {"capmax_channel_update", "capmax_slco"} <= set(cc.untested_kinds)
     assert keyups == [(469_062_500, keyups[0][1], keyups[0][1] + 8)]
+
+
+def test_field_capture_of_the_469_mhz_control_channel(store, cfg):
+    """Two seconds of the site-2 control channel (469.65 MHz, 2026-10-31, -Z). DSD-FME flags every
+    CSBK (CRC ERR) and prints nothing for it, yet the same bytes repeat exactly and their fields are
+    right: the CRC is keyed. The Aloha confirms the site, and the neighbour broadcasts name site 3 on
+    LCN 5 (as SDRTrunk showed) and site 1 on LCN 2."""
+    from conftest import SAMPLES
+
+    st = ingest_log_file(store, SAMPLES / "capmax" / "dsd_fme_469650000_20261031_003613_excerpt.log", cfg)
+    assert st.unrecognized_total == 0 and st.variant == "tier3"
+    assert st.quality["pdu_keyed_crc"] > 30 and st.quality["pdu_crc_err"] == 4      # each distinct payload trusted from its repeat on
+    assert st.csbk_opcodes == {"FID 10 opcode 19": 21, "FID 00 opcode 19": 10, "FID 00 opcode 28": 9}
+    rows = [json.loads(r["payload"]) for r in store.rows("SELECT payload FROM csbk_events WHERE kind = 'tier3_bcast'")]
+    neighbours = {(p["adj_sub_site"] - 1, p["lpcn"]) for p in rows if p["a_type"] == "adjacent_site"}
+    assert neighbours == {(3, 5), (1, 2)}                                                # on-air site, LCN
+    aloha = [json.loads(r["payload"]) for r in store.rows("SELECT payload FROM csbk_events WHERE kind = 'tier3_sys_parms'")]
+    assert {(p["source"], p["sys_code"], p["sub_site"]) for p in aloha} == {("slc_c_sys_parms", "2102", 3), ("c_aloha_sys_parms", "2102", 3)}
+
+
+def test_a_crc_failure_with_fec_errors_or_seen_once_is_not_trusted():
+    good = csbk_pdu(0x21, 0x10, [(16, 12, 7), (32, 24, 2102)])
+    bad = good.rsplit("[", 2)[0] + "[00][00]\n"                                          # the same fields, a CRC that fails
+    once = "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (CRC ERR)\n" + bad
+    assert not _structural(_parse(once), "capmax_channel_update")
+    assert _structural(_parse(once * 2), "capmax_channel_update")                         # repeated: trusted
+    fec = "12:00:00 Sync: +DMR  [slot1]  slot2  | Color Code=01 | CSBK (FEC ERR)\n" + bad
+    assert not _structural(_parse(fec * 3), "capmax_channel_update")

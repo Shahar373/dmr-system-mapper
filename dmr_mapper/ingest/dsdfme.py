@@ -201,6 +201,10 @@ class LineParser:
         self._tier3_lines = 0                       # Tier III system parameters seen in this stream
         self._capplus_lines = 0                     # Cap+ channel status CSBKs seen in this stream
         self._burst_crc_err = False                 # DSD-FME flagged the last burst (CRC ERR)
+        self._burst_fec_err = False                 # ... or (FEC ERR): its bits are not to be trusted at all
+        self._csbk_n = 0                            # CSBK payloads seen, and how many failed their CRC
+        self._csbk_bad_crc = 0
+        self._bad_crc_seen: dict[bytes, None] = {}  # recent payloads that failed their CRC (insertion ordered)
         self._ras = False                           # ... or marked it {RAS ...}: its CRC carries a MAC
         self.lines = 0
         self.parsed = 0
@@ -359,6 +363,7 @@ class LineParser:
         self._burst_kind = kind
         self._lines_since_burst = 0
         self._burst_crc_err = crc
+        self._burst_fec_err = "FEC ERR" in tail
         self._ras = "{RAS" in tail
         yield Burst(self._ts, m.group("pol"), slot, cc, kind, crc, tail.strip()[:120])
 
@@ -671,12 +676,25 @@ class LineParser:
         """``DMR PDU Payload``: only CSBKs are read, and only what DSD-FME printed nothing for."""
         if self._burst_kind != "CSBK" or len(b) != 12:
             return
+        self._csbk_n += 1
         if not csbk_crc_ok(b):
-            if not (self._ras and not self._burst_crc_err):
+            self._csbk_bad_crc += 1
+            if self._burst_fec_err:
                 yield Quality(self._ts, "pdu_crc_err")
                 return
-            # a RAS system: the CRC carries a MAC, so DSD-FME decodes on its FEC alone, and so do we
-            yield Quality(self._ts, "pdu_ras")
+            if self._ras and not self._burst_crc_err:
+                # a RAS system: the CRC carries a MAC, so DSD-FME decodes on its FEC alone, and so do we
+                yield Quality(self._ts, "pdu_ras")
+            elif self._keyed_crc() or b in self._bad_crc_seen:
+                # a keyed CRC (Capacity Max at 469 MHz): the FEC corrected the bits, and the stream
+                # shows its CRCs are never right, or these very bytes came before
+                yield Quality(self._ts, "pdu_keyed_crc")
+            else:
+                self._bad_crc_seen[b] = None
+                if len(self._bad_crc_seen) > 512:
+                    del self._bad_crc_seen[next(iter(self._bad_crc_seen))]
+                yield Quality(self._ts, "pdu_crc_err")
+                return
         d = decode_csbk(b)
         key = f"FID {d['fid']:02X} opcode {d['opcode']:02X}"
         p = self._pending
@@ -692,6 +710,11 @@ class LineParser:
                 if d["channel"] not in (0, 0xFFF):
                     p.payload["lpcn"] = d["channel"]
                 p.payload["own_sys_code"] = d["own"]["sys_code"]
+        if self._lines_since_burst == 0 and d.get("kind") in ("aloha", "adjacent_site", "vote_now", "grant"):
+            # DSD-FME printed nothing (it rejected the CRC): the event comes from the bytes alone
+            yield from self._from_bytes(d)
+            yield RawOpcode(self._ts, key, True, "")
+            return
         if d.get("kind") == "capmax_channel_update":
             for u in d["updates"]:
                 ids = [("tg", u["tg"], "tgt")] if d["mode"] == "open" else []
@@ -702,6 +725,32 @@ class LineParser:
             yield RawOpcode(self._ts, key, False, " ".join(f"{x:02X}" for x in b))
         else:
             yield RawOpcode(self._ts, key, True, "")
+
+    def _keyed_crc(self) -> bool:
+        return self._csbk_n >= 30 and self._csbk_bad_crc >= 0.9 * self._csbk_n
+
+    def _from_bytes(self, d: dict[str, Any]) -> Iterator[Event]:
+        if d["kind"] == "aloha":
+            payload: dict[str, Any] = {"source": "c_aloha_sys_parms", "cat": None, "reg": None, "csc": None, "from_bytes": True}
+            self._set_ids(payload, d["own"])
+            self._tier3_lines += 1
+            yield self._event("tier3_sys_parms", payload)
+        elif d["kind"] in ("adjacent_site", "vote_now"):
+            payload = {"a_type": d["kind"], "text": "from bytes", "from_bytes": True, "own_sys_code": d["own"]["sys_code"]}
+            self._set_ids(payload, d["neighbor"], "adj_")
+            if d["channel"] not in (0, 0xFFF):
+                payload["lpcn"] = d["channel"]
+            if d["info_available"]:
+                payload["online"] = d["online"]
+            yield self._event("tier3_bcast", payload)
+        elif d["kind"] == "grant":
+            group = d["code"] in ("TV_GRANT", "BTV_GRANT", "TD_GRANT")
+            ids = [("radio", d["src"], "src")] if d["src"] else []
+            if d["tgt"]:
+                ids.append(("tg" if group else "radio", d["tgt"], "tgt"))
+            yield self._event("grant", {"variant": "tier3", "kind": "group" if group and d["grant"] != "data" else d["grant"],
+                                        "code": d["code"], "lpcn": d["lpcn"], "ts": d["slot"], "tgt": d["tgt"], "src": d["src"],
+                                        "from_bytes": True}, ids)
 
     # -- Tier III broadcast continuation ------------------------------------------------------------
     def _t3_detail(self, p: Structural, s: str) -> bool:

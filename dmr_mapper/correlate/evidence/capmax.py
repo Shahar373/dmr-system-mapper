@@ -1,7 +1,8 @@
 """Capacity Max: which carrier is which LCN.
 
 The control channel's channel updates (CSBK FID 0x10 opcode 0x21/0x22, read from DSD-FME's raw
-bytes) say "talkgroup T is on LCN L, timeslot s" while a call is on. A watch session hears the
+bytes) say "talkgroup T is on LCN L, timeslot s" while a call is on; so do its channel grants
+(their LPCN is the LCN), for a talkgroup or, a private call, a radio. A watch session hears the
 traffic channel key up at that moment, and the DSD-FME it started on it prints the call to T.
 Lining the two up gives the traffic channel's LCN and ties it to the control channel's site:
 
@@ -39,16 +40,33 @@ def _saturating(n: float) -> float:
     return round(1.0 - (1.0 - PER_MATCH) ** n, 4)
 
 
+def _assignments(ctx: Context) -> list[tuple[int, int, int, dict]]:
+    """(control carrier, ts, last_ts, {lcn, slot, tg, mode}) from channel updates and from Tier III
+    channel grants (their LPCN is the LCN on Capacity Max). ``mode``: open (a group talkgroup),
+    private (a radio), or advantage/data (only key-ups can match)."""
+    out = []
+    for r in ctx.store.rows(
+            "SELECT carrier_id, kind, ts, last_ts, payload FROM csbk_events WHERE kind IN ('capmax_channel_update', 'grant') AND last_ts >= ?",
+            (ctx.since,)):
+        p = json.loads(r["payload"])
+        if r["kind"] == "grant":
+            if p.get("variant") != "tier3" or p.get("lpcn") is None or not p.get("tgt"):
+                continue
+            mode = {"group": "open", "private": "private"}.get(p.get("kind"), "data")
+            p = {"lcn": p["lpcn"], "slot": p.get("ts"), "tg": p["tgt"], "mode": mode}
+        out.append((int(r["carrier_id"]), int(r["ts"]), int(r["last_ts"]), p))
+    return out
+
+
 def lcn_keyup(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
-    updates = ctx.store.rows(
-        "SELECT carrier_id, ts, last_ts, payload FROM csbk_events WHERE kind = 'capmax_channel_update' AND last_ts >= ?", (ctx.since,))
+    updates = _assignments(ctx)
     if not updates:
         return []
-    calls: dict[int, list[tuple[int, int, int, int | None]]] = defaultdict(list)   # tg → [(carrier, ts, last_ts, slot)]
+    calls: dict[tuple[int, bool], list[tuple[int, int, int, int | None]]] = defaultdict(list)   # (tgt, group) → [(carrier, ts, last_ts, slot)]
     for r in ctx.store.rows("SELECT carrier_id, ts, last_ts, payload FROM csbk_events WHERE kind = 'call' AND last_ts >= ?", (ctx.since,)):
         p = json.loads(r["payload"])
-        if p.get("group") and p.get("tgt"):
-            calls[int(p["tgt"])].append((int(r["carrier_id"]), int(r["ts"]), int(r["last_ts"]), p.get("slot")))
+        if p.get("tgt"):
+            calls[(int(p["tgt"]), bool(p.get("group")))].append((int(r["carrier_id"]), int(r["ts"]), int(r["last_ts"]), p.get("slot")))
     keyups = sorted((float(r["start"]), int(r["carrier_id"]))
                     for r in ctx.store.rows("SELECT carrier_id, start FROM keyups WHERE end >= ?", (ctx.since,)))
     starts = [k[0] for k in keyups]
@@ -56,17 +74,14 @@ def lcn_keyup(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
     # votes[(control, carrier)][lcn] = weight; plus bookkeeping for details
     votes: dict[tuple[int, int], dict[int, float]] = defaultdict(lambda: defaultdict(float))
     info: dict[tuple[int, int], dict] = {}
-    for r in updates:
-        c_id = int(r["carrier_id"])
+    for c_id, ts, last, p in updates:
         cc = ctx.carriers.get(c_id)
         if cc is None:
             continue
-        p = json.loads(r["payload"])
         lcn, slot, tg = int(p["lcn"]), p.get("slot"), int(p["tg"])
-        ts, last = int(r["ts"]), int(r["last_ts"])
         matched_by_call: set[int] = set()
-        if p.get("mode") == "open":                        # Advantage mode carries short TG ids, not the call's
-            for f_id, cts, clast, cslot in calls.get(tg, []):
+        if p.get("mode") in ("open", "private"):           # Advantage mode carries short TG ids, not the call's
+            for f_id, cts, clast, cslot in calls.get((tg, p["mode"] == "open"), []):
                 if f_id == c_id or f_id in matched_by_call or not _may_belong(ctx, cc, f_id):
                     continue
                 if cts - CALL_WINDOW_S <= last and clast + CALL_WINDOW_S >= ts and (cslot is None or slot is None or int(cslot) == int(slot)):

@@ -11,7 +11,12 @@ of it DSD-FME has already printed as text. What it does not print is read here, 
   Field layout from SDRTrunk (``CapacityMaxOpenModeVoiceChannelUpdate``,
   ``CapacityMaxAdvantageModeVoiceChannelUpdate``).
 * the opcode and 24 data bits of every short LC, so an opcode DSD-FME misnames (0xF, printed as
-  "Capacity Plus Site" on Capacity Max carriers) or does not know keeps its content.
+  "Capacity Plus Site" on Capacity Max carriers) or does not know keeps its content;
+* Aloha, Adjacent_Site / Vote_Now and channel grants when DSD-FME printed nothing for them. On the
+  469 MHz Capacity Max network (field log 2026-10-31) every CSBK fails DSD-FME's CRC although the
+  same bytes repeat exactly and their fields are right (Aloha SYS 2102 on the site-2 control
+  channel, neighbour site 3 on LCN 5 as SDRTrunk showed): the CRC is keyed, not damaged. See
+  ``dsdfme.LineParser._raw_pdu`` for when such a CSBK is trusted.
 
 Nothing here touches samples or symbols: it is bookkeeping on bytes DSD-FME already decoded, and
 a CSBK is only used when its own CRC checks out.
@@ -71,6 +76,8 @@ def address_hash(address: int) -> int:
 
 
 MODELS = ("Tiny", "Small", "Large", "Huge")
+GRANTS = {48: ("PV_GRANT", "private"), 49: ("TV_GRANT", "group"), 50: ("BTV_GRANT", "group"), 51: ("PD_GRANT", "data"),
+          52: ("TD_GRANT", "data"), 53: ("PV_GRANT_DX", "private"), 54: ("PD_GRANT_DX", "data"), 55: ("PD_GRANT_MI", "data")}
 _NET_BITS = (9, 7, 4, 2)          # the 12 bits after the model: net, then site (ETSI TS 102 361-4 7.2.19)
 
 
@@ -110,6 +117,10 @@ def decode_csbk(b: bytes) -> dict[str, Any]:
         if out["a_type"] in (2, 6):                           # Vote_Now / Adjacent_Site; on Capacity Max the channel is an LCN
             out.update(kind="adjacent_site" if out["a_type"] == 6 else "vote_now", neighbor=system_identity(field(v, 80, 21, 14)),
                        channel=field(v, 80, 68, 12), info_available=bool(field(v, 80, 56, 1)), online=bool(field(v, 80, 57, 1)))
+    elif 48 <= out["opcode"] <= 55:                           # channel grants (ETSI TS 102 361-4 7.1.1.1.1)
+        code, kind = GRANTS[out["opcode"]]
+        out.update(kind="grant", code=code, grant=kind, lpcn=field(v, 80, 16, 12), slot=field(v, 80, 28, 1) + 1,
+                   tgt=field(v, 80, 32, 24), src=field(v, 80, 56, 24))
     elif out["fid"] == 0x10 and out["opcode"] == 0x21:
         lcn = field(v, 80, 16, 12)
         updates = [{"lcn": lcn, "slot": slot, "tg": tg} for slot, tg in ((1, field(v, 80, 32, 24)), (2, field(v, 80, 56, 24))) if tg]

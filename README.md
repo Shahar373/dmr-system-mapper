@@ -214,6 +214,7 @@ hardware is involved.
 | Path | What it is |
 |---|---|
 | `samples/capplus/dsd_fme_168863_20260509_163344.log` | 17-minute live capture (2026-05-09, 168.863 MHz) of a Motorola Linked Capacity Plus site: site 2, colour code 2, neighbour site 1, rest-channel hops every 30 s, group calls on TG 1 / 2102 / 2103, LRRP data. 2.5 MB, raw ANSI colour. |
+| `samples/capmax/dsd_fme_469650000_20261031_003613_excerpt.log` | Two seconds of the Capacity Max site-2 control channel (469.65 MHz, 2026-10-31, `-Z`): every CSBK flagged `(CRC ERR)` by DSD-FME (a keyed CRC) but readable from its bytes; Aloha SYS 2102, neighbours site 3 on LCN 5 and site 1 on LCN 2. No radio IDs. |
 | `samples/surveyor/decodes_20260713/` | dmr-iq-surveyor decode batch of 8 VHF carriers (162.5–167.1 MHz) from two 11-second IQ recordings on 2026-07-13: per-carrier `extraction_report.json`, `decoder/decoder_report*.json`, and the DSD-FME logs. Two carriers are further Capacity Plus sites (0 and 5), six are Tier II conventional repeaters. |
 
 Things to know about the surveyor samples:
@@ -229,7 +230,7 @@ Things to know about the surveyor samples:
   `C0013/20260713_150256/iq/discriminator.wav`, kept as an optional DSD-FME regression input.
   The repository history still contains the removed blobs.
 
-No Connect Plus, Tier III, Capacity Max or Hytera XPT capture exists in the samples yet. Those
+No Connect Plus, Tier III or Hytera XPT capture exists in the samples yet, and of Capacity Max only the control-channel excerpt above. Those
 parsers are written from the DSD-FME source formats (and SDRTrunk's bit layouts for the Motorola
 messages) and tested on synthetic lines; a real capture of each, named per CAPTURE.md, is the most
 useful thing to add to `samples/`. For the 469 MHz Capacity Max network: set
