@@ -1,5 +1,5 @@
 """The first field run on the Pi (2026-10-30): a Motorola Tier III network (likely Cap Max) on
-469 MHz, net 2, Large model, sites 1.2 and 1.3, whose SYS code changes with the site, plus a
+469 MHz, net 1, Large model, sites 1 and 2 on air (DSD-FME prints net 2, sites 1.2 and 1.3), whose SYS code changes with the site, plus a
 Capacity Plus repeater. DSD-FME also printed stray "Capacity Plus Site: 0" lines on the Tier III
 carriers. Payloads below are copied from that database."""
 
@@ -51,7 +51,7 @@ def test_one_tier3_network_with_two_sites(store, cfg):
     types = {e["type"] for e in explain(store, same_site["id"], cfg, now=NOW)["evidence"]}
     assert "explicit_same_site" in types
     ev = next(e for e in explain(store, same_site["id"], cfg, now=NOW)["evidence"] if e["type"] == "explicit_same_site")
-    assert ev["details"]["variant"] == "tier3" and ev["details"]["site"] == "1.3" and ev["raw"] == 1.0
+    assert ev["details"]["variant"] == "tier3" and ev["details"]["site"] == "2" and ev["raw"] == 1.0
     for f in (469_062_500, 469_650_000):
         l = links[(f, 469_350_000, "same_system")] if f < 469_350_000 else links[(469_350_000, f, "same_system")]
         assert l["label"] == "probable" and not l["tier2_only"], l
@@ -59,9 +59,9 @@ def test_one_tier3_network_with_two_sites(store, cfg):
     assert not any(469_800_000 in (a, b) for a, b, _ in links)
     systems = [dict(r) for r in store.rows("SELECT * FROM systems")]
     t3 = [s for s in systems if s["variant"] == "tier3"]
-    assert len(t3) == 1 and t3[0]["label"] == "Tier III net 2 (Large)" and t3[0]["sys_code"] == "2101,2102" and t3[0]["net_id"] == 2
+    assert len(t3) == 1 and t3[0]["label"] == "Tier III net 1 (Large)" and t3[0]["sys_code"] == "2101,2102" and t3[0]["net_id"] == 1
     sites = {r["label"].split(" (")[0].split(" @")[0] for r in store.rows("SELECT * FROM sites WHERE system_id = ?", (t3[0]["id"],))}
-    assert sites == {"site 1.2", "site 1.3"}, sites
+    assert sites == {"site 1", "site 2"}, sites       # on air, as SDRTrunk (DSD-FME: 1.2, 1.3)
     cap_sys = next(s for s in systems if s["variant"] == "capplus")
     cap_sites = {r["site_number"]: r["directly_observed"] for r in store.rows("SELECT * FROM sites WHERE system_id = ?", (cap_sys["id"],))}
     assert cap_sites == {2: 1, 3: 0}

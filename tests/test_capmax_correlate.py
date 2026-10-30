@@ -1,6 +1,6 @@
 """Phase 4: Capacity Max LCNs and neighbours in the correlator, on a synthetic two-site network
-(Large model, raw net 1, sites 1 and 2 = "1.2" and "1.3" as DSD-FME prints them, neighbour site
-3 = "1.4" announced on LCN 5 but never heard)."""
+(Large model, net 1, sites 1 and 2 on air, "1.2" and "1.3" as DSD-FME prints them; neighbour site
+3, "1.4", announced on LCN 5 but never heard). Shown with the on-air numbers, as SDRTrunk."""
 
 from __future__ import annotations
 
@@ -79,11 +79,11 @@ def test_a_multisite_call_does_not_mix_up_the_sites(capmax_store, cfg):
 
 def test_the_unheard_neighbour_site_carries_its_lcn(capmax_store):
     sites = {r["label"]: dict(r) for r in capmax_store.rows("SELECT * FROM sites")}
-    unheard = [s for label, s in sites.items() if label.startswith("site 1.4")]
+    unheard = [s for label, s in sites.items() if label.startswith("site 3")]
     assert len(unheard) == 1 and unheard[0]["directly_observed"] == 0
     assert "LCN 5" in unheard[0]["label"]
     systems = capmax_store.rows("SELECT * FROM systems WHERE variant = 'tier3'")
-    assert len(systems) == 1 and systems[0]["label"] == "Tier III net 2 (Large)"
+    assert len(systems) == 1 and systems[0]["label"] == "Tier III net 1 (Large)"
 
 
 def test_one_long_call_is_one_match_and_minute_marks_are_not_calls(tmp_path, store, cfg):

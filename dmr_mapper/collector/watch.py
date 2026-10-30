@@ -30,6 +30,7 @@ from typing import Any
 
 import numpy as np
 
+from ..correlate.context import t3_on_air
 from ..db import Store
 from .power import PowerState
 from .scheduler import DC_GUARD_HZ, off_dc
@@ -103,7 +104,7 @@ def tier3_carriers(store: Store, since: int) -> dict[int, dict[str, Any]]:
             d["control"] += int(r["count"])
         else:
             d["payload"] += int(r["count"])
-        key = (p.get("model"), p.get("net_id"))
+        key = (p.get("model"), t3_on_air(p.get("net_id"), p.get("site_id") or 0, p.get("sub_site"))[0])
         d["nets"][key] = d["nets"].get(key, 0) + int(r["count"])
     for d in out.values():
         d["net"] = max(d["nets"], key=d["nets"].get)

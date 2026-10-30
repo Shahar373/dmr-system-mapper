@@ -48,7 +48,7 @@ def test_plan_picks_the_tier3_network_and_pins_control_channels(store, cfg):
     _tier3(store, 465_000_000, "slc_c_sys_parms", net=5)        # another network, elsewhere
     store.commit()
     p = plan_watch(store, cfg, 2_000_000, limit=3)
-    assert p.system == "tier3 Large net 2" and p.reason.startswith("Tier III")
+    assert p.system == "tier3 Large net 1" and p.reason.startswith("Tier III")
     assert p.channels[0] <= 469_062_500 and p.channels[-1] >= 469_650_000
     assert all(abs(f - p.center_hz) >= 25_000 for f in p.channels)            # nothing on the receiver's DC point
     assert len(p.pinned) == 1 and p.pinned[0] in (469_350_000, 469_650_000)    # battery: one CC, two traffic

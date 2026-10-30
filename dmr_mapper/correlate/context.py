@@ -21,7 +21,7 @@ class CarrierInfo:
     # explicit identity seen on this carrier
     cap_sites: dict[int, int] = field(default_factory=dict)       # site number → count (Cap+)
     con_sites: dict[tuple[int, int], int] = field(default_factory=dict)   # (net, site) → count (Con+)
-    t3_sites: dict[tuple[str | None, int | None, int], int] = field(default_factory=dict)  # (sys, net, site) → count; site see t3_site_number
+    t3_sites: dict[tuple[str | None, int | None, int], int] = field(default_factory=dict)  # (sys, net, site) on air (t3_on_air) → count
     t3_models: dict[str, int] = field(default_factory=dict)        # Tier III network model (Tiny/Small/Large/Huge) → count
     t3_control: int = 0                                            # Tier III announcements only a control channel makes
     xpt_sites: set[int] = field(default_factory=set)
@@ -40,18 +40,19 @@ class CarrierInfo:
         return keys
 
 
-def t3_site_number(site_id, sub_site) -> int:
-    """One integer per Tier III site. DSD-FME prints Large/Huge-model sites as "site.sub" (1.3);
-    both parts identify the site, so they are kept as site*100 + sub (see ``format_site``)."""
-    site = int(site_id)
-    return site * 100 + int(sub_site) if sub_site is not None else site
+def t3_on_air(net_id, site_id, sub_site) -> tuple[int | None, int]:
+    """The Net and Site a Tier III network sends on air, as SDRTrunk shows them; everything the
+    correlator derives and shows uses these. Stored payloads keep what DSD-FME printed: with
+    ``-D 0`` (and by default) ``Net ID: net+1; Site ID: 1.site+1`` (raw net 1 site 1 prints
+    ``Net ID: 2; Site ID: 1.2``); a print without a sub-site is already raw (rawpdu.printed_ids)."""
+    net = None if net_id is None else int(net_id)
+    if sub_site is None:
+        return net, int(site_id)
+    return (None if net is None else net - 1), (int(site_id) - 1) * 1024 + int(sub_site) - 1
 
 
 def format_site(number) -> str:
-    if number is None:
-        return "?"
-    n = int(number)
-    return f"{n // 100}.{n % 100}" if n >= 100 else str(n)
+    return "?" if number is None else str(int(number))
 
 
 class Context:
@@ -96,7 +97,7 @@ class Context:
                 for s in p.get("sites", []):
                     c.neighbors["conplus"].add(int(s))
             elif kind == "tier3_sys_parms":
-                key = (p.get("sys_code"), p.get("net_id"), t3_site_number(p.get("site_id"), p.get("sub_site")))
+                key = (p.get("sys_code"), *t3_on_air(p.get("net_id"), p.get("site_id"), p.get("sub_site")))
                 c.t3_sites[key] = c.t3_sites.get(key, 0) + n
                 if p.get("model"):
                     c.t3_models[str(p["model"])] = c.t3_models.get(str(p["model"]), 0) + n
@@ -104,10 +105,10 @@ class Context:
                     c.t3_control += n
             elif kind == "tier3_bcast":
                 if p.get("a_type") == "adjacent_site" and p.get("adj_site_id") is not None:
-                    number = t3_site_number(p["adj_site_id"], p.get("adj_sub_site"))
-                    c.neighbors["tier3"].add((p.get("sys_code"), p.get("adj_net_id"), number))
+                    net, number = t3_on_air(p.get("adj_net_id"), p["adj_site_id"], p.get("adj_sub_site"))
+                    c.neighbors["tier3"].add((p.get("sys_code"), net, number))
                     if p.get("lpcn"):
-                        c.neighbor_channels[(p.get("adj_net_id"), number)] = int(p["lpcn"])
+                        c.neighbor_channels[(net, number)] = int(p["lpcn"])
                 if p.get("a_type") == "chan_freq" and p.get("rx_freq_hz"):
                     c.announced_freqs[int(p["rx_freq_hz"])] = {"lpcn": p.get("apcn") or p.get("lpcn"), "sys": p.get("sys_code")}
             elif kind == "xpt_adjacent":

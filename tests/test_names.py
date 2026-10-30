@@ -25,7 +25,7 @@ def _site_of(store, freq):
 def test_tier3_names_follow_the_network_identity(capmax_store, cfg, tmp_path):
     store = capmax_store
     res = set_name(store, "system", "469.35", "רשת צפון")              # by a carrier's frequency in MHz
-    assert res["anchor"] == "tier3:Large:2"
+    assert res["anchor"] == "tier3:Large:1"
     set_name(store, "site", str(CC_B), "Hilltop <b>")
     assert _system_of(store, T7)["name"] == "רשת צפון"                 # every carrier of the network
     # the tables are rebuilt with new ids: the names come back
@@ -34,11 +34,11 @@ def test_tier3_names_follow_the_network_identity(capmax_store, cfg, tmp_path):
     assert _system_of(store, CC_A)["name"] == "רשת צפון"
     assert _site_of(store, CC_B)["name"] == "Hilltop <b>" and _site_of(store, CC_A)["name"] is None
     _, text = systems_report(store, "possible")
-    assert "רשת צפון (Tier III net 2 (Large))" in text and "Hilltop <b> (site 1.3" in text
+    assert "רשת צפון (Tier III net 1 (Large))" in text and "Hilltop <b> (site 2" in text
     paths, _ = export_all(store, cfg, tmp_path / "exp", "weak")
     html = paths[0].read_text(encoding="utf-8")
     data_line = next(line for line in html.splitlines() if line.startswith("const DATA"))
-    assert "Hilltop \\u003cb> (site 1.3" in data_line                    # in the data without a "<", shown through esc()
+    assert "Hilltop \\u003cb> (site 2" in data_line                    # in the data without a "<", shown through esc()
     assert "<b>" not in data_line and "Hilltop <b>" not in html and "esc(v)" in html
     # renaming replaces, --clear removes
     set_name(store, "system", str(_system_of(store, CC_A)["id"]), "North")
@@ -67,7 +67,7 @@ def test_a_system_without_identity_is_named_by_its_carriers(store, cfg):
 def test_name_cli(capmax_store, cfg, tmp_path, capsys, monkeypatch):
     db = capmax_store.path
     assert main(["--db", str(db), "name", "system", "469350000", "North", "network"]) == 0
-    assert "named 'North network' (anchored on tier3:Large:2)" in capsys.readouterr().out
+    assert "named 'North network' (anchored on tier3:Large:1)" in capsys.readouterr().out
     assert main(["--db", str(db), "names"]) == 0
     assert "North network" in capsys.readouterr().out
     assert main(["--db", str(db), "name", "site", "999"]) == 2
@@ -92,10 +92,10 @@ def test_anchor_comes_from_the_announcing_carriers_and_unnameable_is_refused(sto
         propose(store, 469_350_000, f, "same_site", 0.9, "LCN learned", cfg, now=NOW)
     run(store, cfg, now=NOW)
     sysrow = _system_of(store, 469_062_500)
-    assert sysrow["variant"] == "tier3" and sysrow["anchor"] == "tier3:Large:2"
+    assert sysrow["variant"] == "tier3" and sysrow["anchor"] == "tier3:Large:1"
     # tables derived before migration 005 had no anchors: naming works them out
     store.conn.execute("UPDATE systems SET anchor = NULL")
-    assert set_name(store, "system", "469062500", "North")["anchor"] == "tier3:Large:2"
+    assert set_name(store, "system", "469062500", "North")["anchor"] == "tier3:Large:1"
     # an announced-only site with no identity to follow cannot keep a name
     sid = store.conn.execute("INSERT INTO sites (system_id, site_number, label, directly_observed, first_seen, last_seen)"
                              " VALUES (?, 3, 'site 3', 0, 0, 0)", (sysrow["id"],)).lastrowid

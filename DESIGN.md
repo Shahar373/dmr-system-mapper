@@ -449,7 +449,7 @@ belong to a **class** that carries the config weight and decay constant.
 | `explicit_neighbor` | explicit | 0.90 | 1.0 if both sites announce each other, 0.65 one-way | `neighbor_site` (between carriers mapped to those sites) | Linked Cap+ `Adjacent Sites`, Con+ `Adjacent Sites`, Tier III `Adjacent_Site`, XPT adjacent |
 | `explicit_lcn_freq` | explicit | 0.95 | 1.0 | `same_site` | Tier III `Chan_Freq` / grants with absolute frequency naming this carrier |
 | `explicit_same_site` | explicit | 0.70 | 1.0 if same site number **and** same system code/net, 0.85 when one side (a Tier III traffic channel) only knows Net/Site, 0.8 if same site number and same CC only (Cap+ has no system code), 0.9 for a shared XPT site | `same_site` | Cap+ `SLCO Site`, Con+ `Net/Site`, Tier III sys parms, XPT site |
-| `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 2 site 1.2 = `2101`, site 1.3 = `2102`); Con+: same Net ID |
+| `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 1 site 1 = `2101`, site 2 = `2102`); Con+: same Net ID |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
 | `behavioral_lsn_table` | behavioral | 0.60 | per match 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+ channel list on A shows a TG active on LSN *n*; carrier B carries that TG call within ±3 s → B is LCN `(n+1)//2` of A's site |
 | `behavioral_lcn_keyup` | behavioral | 0.70 | `(1 − 0.6^n) × agreement`; per assignment at most one match per carrier: a call to the TG on the same slot during it = 1, else a key-up within ±3 s of its first update = ½ shared by all carriers that keyed up then | `same_site` | Cap Max: control channel A announces TG T on LCN L (channel update); carrier B carries the call to T, or keys up, at that moment → B is LCN L of A's site. Carriers whose own short LC names another site are never matched (a group call goes out on every site) |
@@ -532,7 +532,7 @@ parser. Summary of what the correlator can use:
 | Tier II | — (CC + `Activity Update` hash pattern is a weak fingerprint) | — | — | — |
 | Cap+ | `SLCO Capacity Plus Site: n` | — (site numbers are per-network; Linked Cap+ neighbours tie them) | `Capacity Plus Adjacent Sites` | LSN 1–16 per site, learned from rest hops; `LCN = (LSN+1)//2`, `slot = (LSN−1)%2+1` |
 | Con+ | `Site ID` | `Net ID` | `Connect Plus Adjacent Sites` | LCN from grants; frequency only via observation |
-| Tier III | `Site ID` + sub-site (Large model prints `1.3`; stored as site×100+sub) | `Net ID` + model (the `SYS` code changes with the site) | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
+| Tier III | `Site ID` + sub-site (DSD-FME prints site 2 as `1.3`; payloads keep the print, the correlator and every display use the on-air number, as SDRTrunk) | `Net ID` + model (the `SYS` code changes with the site) | `C_BCAST Adjacent_Site` with LPCN | `Chan_Freq`/APCN give absolute RX/TX frequency; otherwise ETSI TS 102 361-4 channel numbering requires a band plan from config |
 | Capacity Max (Tier III, Motorola) | as Tier III | as Tier III | `Adjacent_Site` whose channel is the neighbour control channel's LCN (read from the bytes: DSD-FME omits it when "connection information" is not available) | channel updates (FID 0x10 opcode 0x21/0x22): TG per LCN and slot, matched with calls and key-ups (`behavioral_lcn_keyup`) |
 | XPT | `XPT Adjacent Site:n` | — | `XPT Adjacent` | `Free LCN`, LSN status list |
 
@@ -550,6 +550,10 @@ print without one (wherever a log starts), and with `-Z` takes the identities of
 and Vote_Now from the bytes (the 14-bit system identity code: 2 bits model, then net and site).
 With `-Z` a broadcast is followed by ` SYS: <own>; Reg: …; BParms1: …` (the broadcasting site's own
 code, stored as `own_sys_code`) and an Aloha by ` Ver: …; SF: …; Backoff: …`.
+Payloads keep that one print (`Net ID: 2; Site ID: 1.2`); the correlator turns it into the on-air
+numbers (`context.t3_on_air`: net 1, site 1, as SDRTrunk shows them), and systems, sites, anchors,
+evidence details, the map and the console show only those. (Before Phase 4.1 sites were kept as
+site×100+sub, which also broke for raw sites from 99 up.)
 
 **RAS.** On a system with RAS the CSBK CRC carries a MAC: DSD-FME decodes on FEC alone (it marks the
 burst `{RAS Skip}`), and so does the parser for the raw bytes (`pdu_ras` in the quality counters).
@@ -738,9 +742,9 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 - **Capacity Max, from SDRTrunk logs of the same network (2026-10-30).** SDRTrunk printed
   `ALOHA LARGE NETWORK:n SITE:m`, `LARGE NEIGHBOR NETWORK:n SITE:m LCN:l` (the standard
   Adjacent_Site broadcast, whose channel field is an LCN on Capacity Max) and channel updates with
-  LCNs (`CHANID = 2 × LCN + slot`). Its numbering is the raw one (net 1 site 1 = DSD-FME's net 2
-  site 1.2, SYS 2101; see "Tier III numbering" in §6). Each control channel announced a neighbour
-  site 3 (DSD-FME: 1.4) on LCN 5 whose frequency is not known yet; it now appears as an announced
+  LCNs (`CHANID = 2 × LCN + slot`). Its numbering is the on-air one, which the mapper now shows too
+  (net 1 site 1 = DSD-FME's net 2 site 1.2, SYS 2101; see "Tier III numbering" in §6). Each control
+  channel announced a neighbour site 3 (DSD-FME: 1.4) on LCN 5 whose frequency is not known yet; it now appears as an announced
   site with that LCN. Traffic channels transmit only during calls: `mapper watch` (Phase 4).
 - **`SLCO Completed Block [..]`** is not undecoded content: with `-Z` DSD-FME prints it after
   *every* short LC it decoded (opcode, 24 data bits, CRC-8, 4 pad bits), right after the decoded

@@ -166,8 +166,8 @@ Burst types seen: `CSBK`, `VLC`, `TLC`, `VC1`–`VC6`, `VC1*`, `IDLE`, `DATA`, `
 
 **Capacity Max** (Motorola Tier III; formats from the DSD-FME source, not yet seen in `samples/`)
 ```
- SLC_C_SYS_PARMS: Large; Net ID: 2; Site ID: 1.2; Reg Req: 1; CSC: 143; SYS: 2101;     ✔ field run (control channel)
- SLC_P_SYS_PARMS: Large; Net ID: 2; Site ID: 1.3; Comp CC: 0; SYS: 2102;              ✔ field run (traffic channel)
+ SLC_C_SYS_PARMS: Large; Net ID: 2; Site ID: 1.2; Reg Req: 1; CSC: 143; SYS: 2101;     ✔ field run (control channel; on air net 1 site 1)
+ SLC_P_SYS_PARMS: Large; Net ID: 2; Site ID: 1.3; Comp CC: 0; SYS: 2102;              ✔ field run (traffic channel; on air net 1 site 2)
  SLCO Capacity Plus Site: 0 - Rest LSN: 0 - RS: 00                                      ✔ field run: SLCO 0xF, a Motorola message, not Cap+
  SLCO Completed Block [21][01][00][00][00]                                              (-Z, after every decoded short LC)
  SLCO Cap Max Activity Update; TGT: 2102;

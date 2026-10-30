@@ -193,7 +193,10 @@ content of short LCs it misnames. Lining up channel updates with the calls and k
 carriers in the slice gives each traffic channel its LCN (`behavioral_lcn_keyup`); a neighbour
 site never heard shows as an announced site with its control channel's LCN.
 
-Names survive correlator runs (they follow the on-air identity, e.g. Tier III net 2, or the
+Tier III networks and sites are shown with the numbers sent on air, as SDRTrunk shows them (net 1
+site 1 is what DSD-FME prints as `Net ID: 2; Site ID: 1.2`).
+
+Names survive correlator runs (they follow the on-air identity, e.g. Tier III net 1, or the
 carriers when there is none) and show in `mapper systems`, the map and the console:
 
 ```sh
