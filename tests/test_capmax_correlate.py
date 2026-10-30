@@ -168,3 +168,32 @@ def test_a_neighbour_or_identity_heard_a_handful_of_times_does_not_count(capmax_
     labels = [r["label"] for r in store.rows("SELECT label FROM sites")]
     assert not any(l.startswith("site 9") for l in labels), labels
     assert "2111" not in (store.scalar("SELECT sys_code FROM systems WHERE variant = 'tier3'") or "")
+
+
+def test_a_traffic_channel_gives_its_own_lcn_in_the_grants_it_repeats(store, cfg):
+    """Field run 2026-10-31: all grants heard on 469.15 MHz named LCN 1; the site-1 control channel
+    469.35 granted LCN 1 (and 2, itself). No control-channel update was heard at the same time."""
+    from test_watch import _tier3
+
+    cc = _tier3(store, CC_A, "slc_c_sys_parms", sub=2)
+    tr = _tier3(store, 469_150_000, "slc_p_sys_parms", sub=2)
+    other = _tier3(store, CC_B, "slc_c_sys_parms", sub=3)
+    for cid in (cc, tr, other):
+        store.upsert_carrier_seen(cid, NOW - 600, NOW - 60)
+    def grants(cid, lpcn, n, key):
+        for _ in range(n):
+            store.add_csbk_event(cid, NOW - 300, 1, 1, "grant", {"variant": "tier3", "kind": "data", "code": "PD_GRANT", "lpcn": lpcn,
+                                                                 "ts": 2, "tgt": 1, "src": 2, "from_bytes": True}, key)
+    grants(tr, 1, 40, "a")
+    grants(tr, 2, 2, "b")
+    grants(cc, 1, 10, "c")
+    grants(other, 1, 10, "d")          # another site granting its own LCN 1: not the same site
+    store.commit()
+    run(store, cfg, now=NOW)
+    lcns = {int(r["freq_hz"]): r["lcn"] for r in store.rows(
+        "SELECT c.freq_hz, cs.lcn FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id")}
+    assert lcns[469_150_000] == 1
+    link = _link(_links(store), CC_A, 469_150_000, "same_site")
+    assert link["label"] == "confirmed"
+    assert _link(_links(store), CC_B, 469_150_000, "same_site") is None or \
+        "explicit_lcn_grant" not in {e["type"] for e in explain(store, _link(_links(store), CC_B, 469_150_000, "same_site")["id"], cfg, now=NOW)["evidence"]}

@@ -19,6 +19,7 @@ COLLECTORS: dict[str, Collector] = {
     "behavioral_rest_hop": behavioral.rest_hop,
     "behavioral_lsn_table": behavioral.lsn_table,
     "behavioral_lcn_keyup": capmax.lcn_keyup,
+    "explicit_lcn_grant": capmax.own_grant_lcn,
     "identity_radio": identity.radio,
     "identity_talkgroup": identity.talkgroup,
     "identity_slco": identity.slco_pattern,

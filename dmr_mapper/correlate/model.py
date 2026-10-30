@@ -14,6 +14,7 @@ EVIDENCE_CLASS: dict[str, str] = {
     "explicit_same_system": "explicit",
     "explicit_neighbor": "explicit",
     "explicit_lcn_freq": "explicit",
+    "explicit_lcn_grant": "explicit",
     "explicit_same_site_contradiction": "explicit",
     "explicit_same_system_contradiction": "explicit",
     "behavioral_rest_hop": "behavioral",

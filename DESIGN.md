@@ -448,6 +448,7 @@ belong to a **class** that carries the config weight and decay constant.
 |---|---|---|---|---|---|
 | `explicit_neighbor` | explicit | 0.90 | 1.0 if both sites announce each other, 0.65 one-way | `neighbor_site` (between carriers mapped to those sites) | Linked Cap+ `Adjacent Sites`, Con+ `Adjacent Sites`, Tier III `Adjacent_Site`, XPT adjacent |
 | `explicit_lcn_freq` | explicit | 0.95 | 1.0 | `same_site` | Tier III `Chan_Freq` / grants with absolute frequency naming this carrier |
+| `explicit_lcn_grant` | explicit | 0.85 | 1.0 | `same_site` | Capacity Max: ≥ 90 % of ≥ 20 grants heard on traffic channel B name LCN L, and control channel A of the same site (both announce it) grants L → B is LCN L. Field run: every grant on 469.0625 named LCN 4, on 469.15 LCN 1 |
 | `explicit_same_site` | explicit | 0.70 | 1.0 if same site number **and** same system code/net, 0.85 when one side (a Tier III traffic channel) only knows Net/Site, 0.8 if same site number and same CC only (Cap+ has no system code), 0.9 for a shared XPT site | `same_site` | Cap+ `SLCO Site`, Con+ `Net/Site`, Tier III sys parms, XPT site |
 | `explicit_same_system` | explicit | 0.80 | Tier III: 1.0 when the sites announce each other, 0.8 on the Net ID alone; Con+ 1.0 | `same_system` | Tier III: same Net ID and network model on different sites (the `SYS` code encodes the site, so it is NOT a network identity: field run 2026-10-30, net 1 site 1 = `2101`, site 2 = `2102`); Con+: same Net ID |
 | `behavioral_rest_hop` | behavioral | 0.50 | per corroborated hop 0.25, saturating `1 - 0.75^n` | `same_site` | Cap+: rest LSN leaves carrier A at `t` and a rest LSN appears on carrier B within ±2 s with the same site number, repeatedly; also builds the LCN↔frequency table (`carrier_sites.lcn`) |
@@ -736,6 +737,14 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   another colour code, are never matched; and sites are built strongest link first without ever
   joining two groups that name different sites on air. `mapper correlate --rebuild` throws the
   automatic evidence away and collects it again (manual evidence and names stay).
+- **Field result, 2026-10-31** (3 watch sessions of 10 min, parked, battery): Tier III net 1
+  (Large). Site 1: control channel 469.35 (LCN 2, from site 2's neighbour broadcast), traffic
+  469.15 (LCN 1, its own grants). Site 2: control channel 469.65 (LCN 3), traffic 469.0625 (LCN 4,
+  from channel updates with calls and from its own grants). Site 3: announced on LCN 5, never
+  heard. Both control channels also carry traffic (they grant their own LCN). In the same slice:
+  a Capacity Plus site (469.4625, 469.8), a Tier II repeater on CC 9 (469.025) and a non-DMR
+  carrier (469.1). Watch on the Pi: 29 ms per 100 ms block, 1 overflow in 10 min after the
+  checkpoint fix, 211 of 221 key-ups decoded.
 - **SD-card stalls.** On the Pi a commit in the session thread sometimes took 1.8 s: SQLite's
   automatic WAL checkpoint (copy into the database, fsync). The receiver overflowed every 20-40 s.
   Session connections now never checkpoint (`wal_autocheckpoint = 0`); the main loop runs a

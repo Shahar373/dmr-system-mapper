@@ -150,3 +150,43 @@ def _may_belong(ctx: Context, control, f_id: int) -> bool:
     if tc is not None and tf is not None and (tc[1] != tf[1] or tc[2] != tf[2]):
         return False
     return True
+
+
+OWN_GRANT_SHARE = 0.9
+OWN_GRANT_MIN = 20
+
+
+def own_grant_lcn(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
+    """A Capacity Max traffic channel repeats the grants of its own calls (field run 2026-10-31:
+    every grant heard on 469.0625 MHz named LCN 4, on 469.15 MHz LCN 1). When 90 % of 20 or more
+    grants on carrier B name LCN L, and a control channel A of the same site grants L, B is LCN L
+    of A's site: explicit, no timing involved."""
+    per: dict[int, dict[int, int]] = defaultdict(lambda: defaultdict(int))
+    for r in ctx.store.rows("SELECT carrier_id, payload, count FROM csbk_events WHERE kind = 'grant' AND last_ts >= ?", (ctx.since,)):
+        p = json.loads(r["payload"])
+        if p.get("variant") == "tier3" and p.get("lpcn"):
+            per[int(r["carrier_id"])][int(p["lpcn"])] += int(r["count"])
+    out: list[Evidence] = []
+    for f_id, lcns in per.items():
+        f = ctx.carriers.get(f_id)
+        total = sum(lcns.values())
+        if f is None or f.t3_control or total < OWN_GRANT_MIN:
+            continue
+        lcn, n = max(lcns.items(), key=lambda kv: kv[1])
+        if n < OWN_GRANT_SHARE * total:
+            continue
+        for c_id, granted in per.items():
+            c = ctx.carriers.get(c_id)
+            if c is None or c_id == f_id or not c.t3_control or granted.get(lcn, 0) < 5:
+                continue
+            tc, tf = ctx.t3_identity(c), ctx.t3_identity(f)
+            if tc is None or tf is None or tc[1:] != tf[1:]:
+                continue                            # same network and site, as both announce
+            ev = Evidence(c.freq_hz, f.freq_hz, "same_site", "explicit_lcn_grant", 1.0,
+                          max(c.last_seen_structural or c.last_seen, f.last_seen_structural or f.last_seen),
+                          min(c.first_seen, f.first_seen), n,
+                          {"carrier": f.freq_hz, "lcn": lcn, "own_grants": n, "of": total, "control": c.freq_hz,
+                           "control_grants_for_it": granted[lcn]}).ordered()
+            ev.lcn_hints[f.freq_hz] = lcn
+            out.append(ev)
+    return out

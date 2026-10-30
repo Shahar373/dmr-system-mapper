@@ -9,7 +9,7 @@ from typing import Any, Iterable, Mapping
 from .model import EVIDENCE_CLASS, STRONG_TYPES, TIER2_TYPES, LinkScore, ScoredEvidence
 
 DEFAULT_WEIGHTS = {
-    "explicit_neighbor": 0.90, "explicit_lcn_freq": 0.95, "explicit_same_site": 0.70, "explicit_same_system": 0.80,
+    "explicit_neighbor": 0.90, "explicit_lcn_freq": 0.95, "explicit_lcn_grant": 0.85, "explicit_same_site": 0.70, "explicit_same_system": 0.80,
     "behavioral_rest_hop": 0.50, "behavioral_lsn_table": 0.60, "behavioral_lcn_keyup": 0.70, "identity_radio": 0.30, "identity_talkgroup": 0.15, "identity_slco": 0.20,
     "rf_profile": 0.10, "manual": 1.00,
 }
