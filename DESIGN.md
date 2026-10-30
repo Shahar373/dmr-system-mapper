@@ -736,6 +736,13 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   another colour code, are never matched; and sites are built strongest link first without ever
   joining two groups that name different sites on air. `mapper correlate --rebuild` throws the
   automatic evidence away and collects it again (manual evidence and names stay).
+- **SD-card stalls.** On the Pi a commit in the session thread sometimes took 1.8 s: SQLite's
+  automatic WAL checkpoint (copy into the database, fsync). The receiver overflowed every 20-40 s.
+  Session connections now never checkpoint (`wal_autocheckpoint = 0`); the main loop runs a
+  passive checkpoint every 30 s. `watch.slow_blocks` in the session summary shows where the time
+  of the slowest blocks went.
+- **Watch pins what was asked for.** With carriers given (`mapper watch 469.35 469.15`), the
+  control channels among them are pinned first; before, the busiest known one in the slice was.
 - **Rare Tier III identities.** A short LC's CRC has 8 bits, so among thousands a few wrong ones
   pass (field run: a neighbour "site 9" on LCN 2, SYS 2111). A carrier's own identity or a
   neighbour it announces counts from 3 times and 1 % of what it announces.

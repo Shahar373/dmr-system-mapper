@@ -81,6 +81,7 @@ class Daemon:
         self._closing = threading.Event()        # the session thread is past its work, writing up
         self._stop_reason: str | None = None
         self._job: threading.Thread | None = None   # correlate / export, off the main loop
+        self._last_checkpoint = 0.0
 
     # -- main loop ---------------------------------------------------------------------------------
     def _acquire_lock(self) -> None:
@@ -188,6 +189,10 @@ class Daemon:
             ok, result = res
             (log.info if ok else log.warning)("command %s from %s: %s", cmd["kind"], cmd.get("source"), result)
             st.finish_command(self._store, int(cmd["id"]), ok, result)
+        if now - self._last_checkpoint >= 30:
+            # the session threads leave checkpoints to this loop (see _session_main)
+            self._store.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
+            self._last_checkpoint = now
         with self._lock:
             progress = dict(self.progress)
         st.write_heartbeat(self._store, self.pid, self.started, self.mode, self.session_id, self.sdr.to_dict(), self.power.to_dict(),
@@ -320,6 +325,10 @@ class Daemon:
 
     def _session_main(self, sid: int, kind: str, params: dict[str, Any], budget_s: int, source: Any) -> None:
         store = Store(self.db_path)
+        # no checkpoints from the thread that reads the receiver: on the Pi's SD card one took 1.8 s
+        # inside a commit and the receiver overflowed every 20-40 s. Commits stay cheap (WAL,
+        # synchronous=NORMAL); the main loop's connection checkpoints instead, beside the session
+        store.conn.execute("PRAGMA wal_autocheckpoint = 0")
         summary: dict[str, Any] = {"budget_s": budget_s}
         status = "done"
         t0 = time.monotonic()

@@ -173,6 +173,10 @@ def plan_watch(store: Store, cfg: dict[str, Any], sample_rate: float, limit: int
     channels = sorted(set(channels) | set(explicit))
     # only known control channels are pinned, at most half the decoders (one on battery)
     pin_from = [f for f in explicit if f in controls and (net is None or controls[f]["net"] == net)]
+    if freqs and any(f in pin_from for f in freqs):
+        # the control channels asked for come first (field run: `watch 469.35 469.15` pinned 469.65,
+        # the other site's control channel, which simply had more history)
+        pin_from = [f for f in freqs if f in pin_from]
     n_pin = min(len(pin_from), max(1, limit // 2))
     pinned = sorted(sorted(pin_from, key=lambda f: -controls[f]["control"])[:n_pin])
     # who gets a decoder first when several channels key up: the network's own traffic channels (and

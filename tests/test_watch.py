@@ -55,6 +55,12 @@ def test_plan_picks_the_tier3_network_and_pins_control_channels(store, cfg):
     assert len(plan_watch(store, cfg, 2_000_000, limit=6).pinned) == 2
     p = plan_watch(store, cfg, 2_000_000, limit=3, freqs=[469_350_000, 469_650_000])
     assert p.reason == "requested carriers" and len(p.pinned) == 1
+    # field run: asking for site 1's control channel must pin it, not the busier one of site 2
+    for _ in range(50):
+        store.add_csbk_event(store.upsert_carrier(469_650_000, NOW), NOW - 300, 1, 1, "tier3_sys_parms",
+                             {"source": "slc_c_sys_parms", "model": "Large", "net_id": 2, "site_id": 1, "sub_site": 3}, "more")
+    store.commit()
+    assert plan_watch(store, cfg, 2_000_000, limit=3, freqs=[469_350_000, 469_200_000]).pinned == [469_350_000]
     with pytest.raises(ValueError):
         plan_watch(store, cfg, 2_000_000, limit=3, freqs=[465_000_000, 469_350_000])
 
