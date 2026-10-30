@@ -175,6 +175,16 @@ def cmd_export(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_prune(args: argparse.Namespace) -> int:
+    from .db.retention import prune
+
+    cfg = load_config(args.config)
+    with _open_store(args, cfg) as store:
+        out = prune(store, cfg)
+    print("pruned: " + (", ".join(f"{k}={v}" for k, v in out.items()) or "nothing to prune"))
+    return 0
+
+
 def cmd_snapshot(args: argparse.Namespace) -> int:
     from .db.snapshot import snapshot
 
@@ -310,6 +320,8 @@ def cmd_survey(args: argparse.Namespace) -> int:
         params["bands"] = args.band
     if args.then_decode:
         params["then_decode"] = True
+        if args.minutes:
+            params["total_budget_s"] = int(args.minutes * 60)
     return _session_command(args, "start_survey", params)
 
 
@@ -360,6 +372,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     import platform
     import shutil
     import subprocess
+    import time
 
     from .collector import state as st
     from .collector.decoder import find_dsd_fme
@@ -405,6 +418,18 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         line(status.status == "present", "receiver", status.short() + (f" [{status.detail}]" if status.detail and status.detail not in status.short() else ""))
     except Exception as exc:  # noqa: BLE001
         line(False, "receiver", str(exc))
+    from .collector.gps import open_gps
+    g = open_gps(cfg)
+    if g.kind == "none":
+        line(None, "gps", g.describe())
+    else:
+        g.start()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline and g.fix() is None and not g.error:
+            time.sleep(0.2)
+        f = g.fix()
+        g.stop()
+        line(f is not None or None, "gps", f"{g.describe()}: " + (f"{f.lat:.5f}, {f.lon:.5f} ({f.fix})" if f else (g.error or "no fix within 5 s")))
     ps = read_power(cfg)
     line(None if ps.source == "unknown" else True, "power", f"{ps.short()} (source: {ps.source})")
     pfile = cfg.get("power", {}).get("state_file")
@@ -475,6 +500,9 @@ def build_parser() -> argparse.ArgumentParser:
     xp.add_argument("--dir", help="with --all: write here instead of paths.exports")
     xp.set_defaults(func=cmd_export)
 
+    pu = sub.add_parser("prune", help="delete radio IDs, talkgroups and their events older than retention.identity_days")
+    pu.set_defaults(func=cmd_prune)
+
     sn = sub.add_parser("snapshot", help="consistent copy of the database for the archive (VACUUM INTO), keeps the newest N")
     sn.add_argument("--dir", help="default: paths.snapshots")
     sn.add_argument("--keep", type=int, help="snapshots kept locally (default: archive.keep_local)")
@@ -497,7 +525,7 @@ def build_parser() -> argparse.ArgumentParser:
     sv = sub.add_parser("survey", help="start a band survey session (through the daemon, or a temporary one)")
     sv.add_argument("--band", action="append", help="band name from config (repeatable; default: all)")
     sv.add_argument("--minutes", type=float, help="session budget")
-    sv.add_argument("--then-decode", action="store_true", help="queue a decode session when the survey ends")
+    sv.add_argument("--then-decode", action="store_true", help="decode right after the survey; --minutes is then the total for both")
     sv.add_argument("--wait", action="store_true", default=True, help="follow the session until it ends (default)")
     sv.add_argument("--no-wait", dest="wait", action="store_false")
     sv.set_defaults(func=cmd_survey)

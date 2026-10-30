@@ -23,10 +23,15 @@ class SurveyHit:
     occupancy_pct: float
     width_hz: float
     klass: str
+    lat: float | None = None          # where the receiver was when this hit was measured
+    lon: float | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"freq_hz": self.freq_hz, "snr_db": round(self.snr_db, 1), "p95_snr_db": round(self.p95_snr_db, 1),
-                "occupancy_pct": round(self.occupancy_pct, 1), "width_hz": round(self.width_hz), "class": self.klass}
+        d = {"freq_hz": self.freq_hz, "snr_db": round(self.snr_db, 1), "p95_snr_db": round(self.p95_snr_db, 1),
+             "occupancy_pct": round(self.occupancy_pct, 1), "width_hz": round(self.width_hz), "class": self.klass}
+        if self.lat is not None:
+            d["lat"], d["lon"] = round(self.lat, 5), round(self.lon, 5)
+        return d
 
 
 def step_centres(start_hz: int, stop_hz: int, sample_rate: float, usable_fraction: float) -> list[float]:
@@ -105,7 +110,10 @@ def analyse_block(x: np.ndarray, sample_rate: float, center_hz: float, raster_hz
 
 
 def sweep(source: IQSource, band: dict[str, Any], cfg: dict[str, Any], stop: Callable[[], bool] | None = None,
-          progress: Callable[[dict[str, Any]], None] | None = None) -> list[SurveyHit]:
+          progress: Callable[[dict[str, Any]], None] | None = None,
+          position: Callable[[], tuple[float, float] | None] | None = None) -> list[SurveyHit]:
+    """``position()`` gives the receiver's (lat, lon) at each step; a hit keeps the position of
+    the step where it was strongest (the receiver may be moving)."""
     scfg = cfg.get("survey", {}) or {}
     sdr = cfg.get("sdr", {}) or {}
     usable_fraction = float(sdr.get("usable_fraction", 0.8))
@@ -122,7 +130,10 @@ def sweep(source: IQSource, band: dict[str, Any], cfg: dict[str, Any], stop: Cal
         source.read(int(source.sample_rate * 0.1))          # settle after retune
         x = source.read(int(source.sample_rate * dwell))
         # label hits with the frequency the source actually reports (a replay cannot retune)
+        here = position() if position else None
         for h in analyse_block(x, source.sample_rate, source.center_hz, raster, usable_fraction, segment, thr):
+            if here is not None:
+                h.lat, h.lon = here
             if int(band["start_hz"]) <= h.freq_hz <= int(band["stop_hz"]):
                 prev = hits.get(h.freq_hz)
                 if prev is None or h.snr_db > prev.snr_db:
@@ -136,7 +147,7 @@ def record(store: Store, band: str, started: int, hits: list[SurveyHit], device:
     run_id = store.add_survey_run(band, started, int(time.time()), device, settings)
     for h in hits:
         store.add_survey_hit(run_id, h.freq_hz, snr_db=h.snr_db, p95_snr_db=h.p95_snr_db, occupancy_pct=h.occupancy_pct,
-                             width_hz=h.width_hz, **{"class": h.klass})
+                             width_hz=h.width_hz, lat=h.lat, lon=h.lon, **{"class": h.klass})
     store.commit()
     return run_id
 

@@ -26,7 +26,7 @@ unit files into `/etc/systemd/system/`:
 |---|---|
 | `dmr-mapper.service` | the daemon, started at boot, restarted if it crashes; holds no receiver while idle |
 | `dmr-mapper-snapshot.timer` | every night at `archive.snapshot_time` (03:30), or at the next boot if the Pi was off |
-| `dmr-mapper-snapshot.service` | correlate, `mapper snapshot` (to `var/snapshots/`), `mapper export --all` (to `var/exports/`) |
+| `dmr-mapper-snapshot.service` | `mapper prune` (90-day retention), correlate, `mapper snapshot` (to `var/snapshots/`), `mapper export --all` (to `var/exports/`) |
 
 It also links `~/.local/bin/mapper`, so `mapper` works from any folder without activating the
 venv (after the next login, if `~/.local/bin` was not on the PATH yet).
@@ -36,7 +36,12 @@ Recommended `config.local.yaml` next to `config.example.yaml`:
 ```yaml
 power:
   state_file: /run/dmr/power.json    # the power guard's state file, if that service is installed
+gps:
+  device: /dev/ttyACM0               # only if `mapper doctor` does not find the GPS by itself
 ```
+
+`mapper doctor` shows which GPS source a session would use. If another program reads the GPS
+device directly, the mapper stays away from it and asks for gpsd, which shares one GPS safely.
 
 ## 2. Daily use
 

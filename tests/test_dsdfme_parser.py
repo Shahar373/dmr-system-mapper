@@ -127,7 +127,8 @@ def test_lrrp_with_position_and_ip_map():
     kinds = [e.kind for e in structural]
     assert kinds == ["ip_map", "ip_map", "lrrp"]
     lrrp = structural[2]
-    assert lrrp.payload == {"src": 199, "tgt": 64250, "direction": "response", "lat": 32.101282, "lon": 34.871515}
+    # the radio's coordinates are never kept, only that it reported a position
+    assert lrrp.payload == {"src": 199, "tgt": 64250, "direction": "response", "has_position": True}
     assert structural[0].payload["radio"] == 199 and structural[0].payload["ip"] == "012.000.000.199"
     assert not any(isinstance(e, Unrecognized) for e in evs)
 

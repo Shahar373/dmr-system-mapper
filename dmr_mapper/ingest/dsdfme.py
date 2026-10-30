@@ -388,9 +388,9 @@ class LineParser:
                     return True
                 if s.startswith("Frequency Not Found") or s.startswith("MBC Channel Grant") or s.startswith("Invalid Channel"):
                     return True
-            if p.kind == "lrrp" and (lm := LATLON_RE.search(s)):
-                p.payload["lat"] = float(lm.group("lat"))
-                p.payload["lon"] = float(lm.group("lon"))
+            if p.kind == "lrrp" and LATLON_RE.search(s):
+                # a radio's own position: only the fact is kept, never the coordinates (privacy)
+                p.payload["has_position"] = True
                 return True
             if p.kind in ("tier3_bcast", "grant", "tier3_sys_parms") and (sm := T3_SYSCODE_RE.search(s)):
                 p.payload["sys_code"] = sm.group("sys").upper()
@@ -559,7 +559,7 @@ class LineParser:
         if m := LRRP_RE.search(s):
             src, tgt = int(m.group("src")), int(m.group("tgt"))
             yield from self._open("lrrp", {"src": src, "tgt": tgt, "direction": "request" if m.group("dir").startswith("Request") else "response",
-                                           "lat": None, "lon": None}, identities=[("radio", src, "lrrp"), ("radio", tgt, "lrrp")])
+                                           "has_position": False}, identities=[("radio", src, "lrrp"), ("radio", tgt, "lrrp")])
             return True
         if LATLON_RE.search(s):
             return True   # position without a preceding LRRP record: nothing to attach to

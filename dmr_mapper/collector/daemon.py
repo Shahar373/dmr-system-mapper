@@ -31,6 +31,7 @@ from . import state as st
 from .bridge import PcmServer
 from .channelizer import AUDIO_RATE, Channelizer
 from .decoder import DecoderProcess, find_dsd_fme
+from .gps import NoGps, open_gps
 from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
@@ -71,6 +72,7 @@ class Daemon:
         self._last_probe = 0.0
         self._last_power = 0.0
         self._store: Store | None = None
+        self.gps: Any = NoGps("no session running")
 
     # -- main loop ---------------------------------------------------------------------------------
     def _acquire_lock(self) -> None:
@@ -269,6 +271,10 @@ class Daemon:
         summary: dict[str, Any] = {"budget_s": budget_s}
         status = "done"
         t0 = time.monotonic()
+        self.gps = open_gps(self.cfg).start()
+        summary["gps"] = self.gps.describe()
+        self._last_track_flush = time.monotonic()
+        self._session_track = 0
         try:
             st.start_session(store, sid)
             summary["source"] = source.describe()
@@ -291,6 +297,17 @@ class Daemon:
                     pass
             summary["elapsed_s"] = round(time.monotonic() - t0, 1)
             try:
+                summary["track_points"] = self._session_track + self._flush_track(store, sid)
+                fix = self.gps.fix()
+                summary["position_end"] = fix.to_dict() if fix else None
+                if getattr(self.gps, "error", None):
+                    summary["gps_error"] = self.gps.error
+            except Exception as exc:  # noqa: BLE001
+                summary["gps_error"] = str(exc)
+            finally:
+                self.gps.stop()
+                self.gps = NoGps("no session running")
+            try:
                 self._after_session(store, kind, params, summary)
             except Exception as exc:  # noqa: BLE001
                 summary["after_error"] = str(exc)
@@ -299,6 +316,22 @@ class Daemon:
             self.message = f"{kind} session #{sid} {status} after {summary['elapsed_s']:.0f} s"
             log.info("%s%s", self.message, f": {summary.get('error')}" if summary.get("error") else "")
             self.mode = "idle"
+
+    def _flush_track(self, store: Store, sid: int) -> int:
+        """Write the GPS points collected since the last call; returns how many."""
+        pts = self.gps.track()
+        for f in pts:
+            store.conn.execute(
+                "INSERT INTO positions (session_id, ts, lat, lon, alt_m, speed_mps, fix, source) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (sid, f.ts, f.lat, f.lon, f.alt_m, f.speed_mps, f.fix, f.source))
+        if pts:
+            store.commit()
+        self._last_track_flush = time.monotonic()
+        return len(pts)
+
+    def _gps_progress(self) -> dict[str, Any]:
+        f = self.gps.fix()
+        return {"gps": f.to_dict() if f else None, "gps_source": self.gps.describe()}
 
     def _check(self, t0: float, budget_s: int) -> None:
         if self.stop_event.is_set() or self.session_stop.is_set():
@@ -312,12 +345,24 @@ class Daemon:
         store.conn.execute("DELETE FROM survey_hits WHERE run_id IN (SELECT id FROM survey_runs WHERE started < ?)",
                            (int(time.time()) - keep * 86400,))
         store.commit()
+        from ..db.retention import prune
+        pruned = {k: v for k, v in prune(store, self.cfg).items() if v}
+        if pruned:
+            summary["pruned"] = pruned
         if kind == "decode" and dcfg.get("correlate_after_decode", True):
             from ..correlate import run as correlate
             rep = correlate(store, self.cfg)
             summary["correlate"] = {"links": rep.links_scored, "by_label": rep.links_by_label, "sites": rep.sites, "systems": rep.systems}
-        if kind == "survey" and params.get("then_decode"):
-            st.post_command(store, "daemon", "start_decode", {"budget_s": params.get("decode_budget_s")})
+        if kind == "survey" and params.get("then_decode") and not self.session_stop.is_set() and not self.stop_event.is_set():
+            # one button, one budget: the decode gets what the survey left over
+            total = int(params.get("total_budget_s") or summary.get("budget_s") or 0)
+            remaining = int(params.get("decode_budget_s") or (total - summary.get("elapsed_s", 0)))
+            if remaining >= 60:
+                st.post_command(store, "daemon", "start_decode", {"budget_s": remaining})
+                summary["then_decode_s"] = remaining
+            else:
+                summary["then_decode_s"] = 0
+                summary["note"] = "the survey used the whole budget: no time left to decode"
 
     # -- survey ------------------------------------------------------------------------------------
     def _survey(self, store: Store, source: Any, params: dict[str, Any], budget_s: int, t0: float, summary: dict[str, Any]) -> None:
@@ -334,7 +379,13 @@ class Daemon:
             started = int(time.time())
 
             def progress(p: dict[str, Any]) -> None:
-                self._set_progress(phase="sweeping", elapsed_s=int(time.monotonic() - t0), budget_s=budget_s, **p)
+                self._set_progress(phase="sweeping", elapsed_s=int(time.monotonic() - t0), budget_s=budget_s, **p, **self._gps_progress())
+                if time.monotonic() - self._last_track_flush >= 30:
+                    self._session_track += self._flush_track(store, self.session_id or 0)
+
+            def here() -> tuple[float, float] | None:
+                f = self.gps.fix()
+                return (f.lat, f.lon) if f else None
 
             def stop() -> bool:
                 try:
@@ -343,7 +394,7 @@ class Daemon:
                     return True
                 return False
 
-            hits = sweep(source, band, self.cfg, stop=stop, progress=progress)
+            hits = sweep(source, band, self.cfg, stop=stop, progress=progress, position=here)
             run_id = record(store, str(band.get("name")), started, hits, source.describe(), {k: v for k, v in scfg.items() if k != "bands"})
             summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits), "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
             self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
@@ -429,9 +480,10 @@ class Daemon:
                     for ing in ingests.values():
                         ing.flush_partial()
                     store.commit()
+                    self._session_track += self._flush_track(store, self.session_id or 0)
                     last_flush = now
                 if now - last_progress >= 1:
-                    self._set_progress(slice_elapsed_s=int(now - slice_t0), elapsed_s=int(now - t0),
+                    self._set_progress(slice_elapsed_s=int(now - slice_t0), elapsed_s=int(now - t0), **self._gps_progress(),
                                        carriers=[{"freq_hz": f, "syncs": ing.pos_syncs, "lines": ing.lines, "level_db": round(chan.channels[f].level_db, 1)}
                                                  for f, ing in ingests.items()])
                     last_progress = now

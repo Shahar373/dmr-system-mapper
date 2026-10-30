@@ -57,7 +57,9 @@ investigation only.
 | 2.1 | Review fixes: site ids on the upsert path, live ingest commits per event, `correlate` output, `window_days` in config | done |
 | 3a | `mapper daemon` / `tui` / `survey` / `decode` / `doctor`: on-demand sessions with a time budget, band survey, FFT channelizer, DSD-FME decode, single-writer live ingest, Textual console | done |
 | 3b | Deployment: `dmr-mapper` systemd service, `deploy/deploy.sh` (pull, install, restart), nightly snapshot + export timer, read-only archive pull, size-capped raw debug logs, `mapper snapshot` / `export --all` | done (first install on the Pi pending) |
-| 4 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet | planned |
+| 3c | GPS track and position of every survey hit (gpsd, or the device when nobody else has it open), one-button survey+decode (`a`), radios' LRRP positions no longer kept, radio IDs and talkgroups kept 90 days (`mapper prune`) | done |
+| 4 | Capacity Max in depth: watch a whole slice and decode traffic channels when they key up, Cap Max neighbour/LCN messages, activity updates from `SLCO Completed Block`, names you give to systems | planned |
+| 5 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet; Claude may look and propose, scans only with your approval | planned |
 
 Each phase ends with a commit to `main` and waits for approval.
 
@@ -138,9 +140,9 @@ processes it can afford (fewer on battery).
 ```sh
 mapper doctor                      # what is installed, is the receiver there, power, database
 mapper daemon                      # foreground; systemd runs this in Phase 3b
-mapper tui                         # the console, over SSH: s survey · d decode · x stop · c correlate · e export · q quit
+mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · x stop · c correlate · e export · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
-mapper survey --band uhf --then-decode
+mapper survey --band uhf --then-decode --minutes 20   # one budget for both
 mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: plan from the latest survey
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions

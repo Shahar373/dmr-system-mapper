@@ -96,6 +96,15 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   write lock is held. A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is
   restarted with `-xr`. Survey SNR is copied into `observations.snr_db_*`.
 - **After a decode session** the correlator runs (`daemon.correlate_after_decode`).
+- **One button** (`a` in the console, `mapper survey --then-decode`): a survey, then a decode
+  session with whatever is left of the one budget. Sessions are short and random (driving, battery).
+- **GPS** (Phase 3c), read only while a session runs: gpsd when it is running (shared safely), else
+  the serial device only if no other process has it open (two readers of one tty steal each
+  other's lines). A track point every 10 s while moving > 25 m, at least one a minute; survey hits
+  carry the position of their strongest step. No GPS never blocks a session.
+- **Retention** (`retention.identity_days`, 90): radio IDs, talkgroups and the events carrying them
+  are deleted after each session and nightly (`mapper prune`); network announcements, observations,
+  links and evidence stay. Radios' LRRP coordinates are never stored.
 
 ### Time handling
 
@@ -320,7 +329,13 @@ CREATE TABLE sessions (id, kind, requested_by, params, budget_s, created, starte
                        summary);                                              -- JSON: hits, carriers, slices, errors
 CREATE TABLE commands (id, created, source, kind, params, status, taken_at, done_at, result);
 
-CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 3
+-- Phase 3c (migration 004): where the receiver was. It is driven around, so a carrier heard
+-- strongly in one place and weakly in another is no contradiction.
+CREATE TABLE positions (id, session_id, ts, lat, lon, alt_m, speed_mps, fix, source);   -- GPS track per session
+-- survey_hits gains lat, lon: where the receiver was at the step where the hit was strongest.
+-- LRRP payloads keep only has_position; radios' coordinates are never stored (and were removed).
+
+CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 4
 ```
 
 Migrations run inside one transaction each (`BEGIN … COMMIT`), so a failed migration leaves no
@@ -633,6 +648,16 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 - **Carriers without DMR** (analogue, another protocol, too weak) stay in `carriers` with variant
   `unknown`; after 30 s of decoding with no DMR the scheduler leaves them out of a round until they
   are stale.
+- **Capacity Max, from SDRTrunk logs of the same network (2026-10-30).** SDRTrunk decodes what this
+  DSD-FME build does not: `ALOHA LARGE NETWORK:n SITE:m`, `LARGE NEIGHBOR NETWORK:n SITE:m LCN:l`
+  and channel grants with network-wide LCNs (`CHANID = 2 × LCN + slot`). Its numbering is DSD-FME's
+  minus one (SDRTrunk net 1 site 1 = DSD-FME net 2 site 1.2, SYS 2101). Each control channel
+  announced a neighbour site 3 on LCN 5 whose frequency is not known yet. Traffic channels transmit
+  only during calls, so a 3 s survey dwell misses them: Phase 4 watches a whole slice instead.
+- **`SLCO Completed Block [..]`** is the raw 36-bit short LC. Opcode 1 is an Activity Update
+  (`[18][00][70][07][60]` = slot 1 group voice, hash 07); opcodes 2/3 are Tier III control/traffic
+  short LCs; `[F0]...` on Cap Max carriers is the Motorola message DSD-FME misprints as a Cap+ site.
+  Decoding these fields is Phase 4.
 - **Tier III channel numbering** without `Chan_Freq` needs a band plan (`survey.tier3_bandplans`)
   to convert LPCN to frequency; absent that, LPCN is stored and the link stays at `possible`.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded

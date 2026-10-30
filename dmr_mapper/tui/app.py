@@ -77,6 +77,9 @@ class StatusBar(Static):
             else:
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} ({c.get('syncs', 0)} syncs)" for c in pr.get("carriers", []))
                 line2 = f"decode #{s.session_id}: slice {pr.get('slice', '?')}/{pr.get('slices', '?')} ({pr.get('reason', '')}) {pr.get('slice_elapsed_s', 0)}/{pr.get('dwell_s', '?')} s: {cs}{tail}"
+        if s.mode in ("survey", "decode"):
+            g = pr.get("gps")
+            line2 += f"\nGPS {g['lat']:.5f}, {g['lon']:.5f} ({g['fix']})" if g else f"\nGPS: no fix ({pr.get('gps_source', '?')})"
         self.update(line1 + "\n" + line2)
 
 
@@ -84,14 +87,14 @@ class MapperApp(App[None]):
     TITLE = "dmr-system-mapper"
     CSS = """
     #status { height: auto; min-height: 3; max-height: 6; padding: 0 1; background: $panel; }
-    #actions { width: 26; padding: 1; }
+    #actions { width: 28; padding: 1; }
     #actions Button { width: 100%; margin-bottom: 1; }
     #budget { margin-bottom: 1; }
     #detail { height: 8; padding: 0 1; background: $panel; }
     DataTable { height: 1fr; }
     """
     BINDINGS = [
-        Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"), Binding("x", "stop", "Stop"),
+        Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"), Binding("x", "stop", "Stop"),
         Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("r", "refresh", "Refresh"),
         Binding("q", "quit", "Quit"),
     ]
@@ -113,6 +116,7 @@ class MapperApp(App[None]):
             with Vertical(id="actions"):
                 yield Label("session minutes")
                 yield Input(placeholder="auto", id="budget", type="integer")
+                yield Button("Survey+Decode (a)", id="auto", variant="success")
                 yield Button("Survey (s)", id="survey", variant="primary")
                 yield Button("Decode (d)", id="decode", variant="primary")
                 yield Button("Stop (x)", id="stop", variant="error")
@@ -263,6 +267,14 @@ class MapperApp(App[None]):
         if not status.alive:
             self.query_one("#log", RichLog).write("[yellow]the daemon is offline: the command waits until it starts[/]")
 
+    def action_auto(self) -> None:
+        """One button for a short drive: survey, then decode with whatever time is left."""
+        params: dict[str, Any] = {"then_decode": True}
+        if (b := self._budget_s()) is not None:
+            params["budget_s"] = b
+            params["total_budget_s"] = b
+        self._post("start_survey", params)
+
     def action_survey(self) -> None:
         params: dict[str, Any] = {}
         if (b := self._budget_s()) is not None:
@@ -289,7 +301,7 @@ class MapperApp(App[None]):
 
     @on(Button.Pressed)
     def _button(self, event: Button.Pressed) -> None:
-        action = {"survey": self.action_survey, "decode": self.action_decode, "stop": self.action_stop,
+        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "stop": self.action_stop,
                   "correlate": self.action_correlate, "export": self.action_export}.get(event.button.id or "")
         if action:
             action()

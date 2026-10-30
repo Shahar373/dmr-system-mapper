@@ -309,10 +309,10 @@ class Store:
 
     def add_survey_hit(self, run_id: int, freq_hz: int, **fields: Any) -> None:
         self.conn.execute(
-            "INSERT OR REPLACE INTO survey_hits (run_id, freq_hz, snr_db, p95_snr_db, occupancy_pct, width_hz, class)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?)",
+            "INSERT OR REPLACE INTO survey_hits (run_id, freq_hz, snr_db, p95_snr_db, occupancy_pct, width_hz, class, lat, lon)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (run_id, freq_hz, fields.get("snr_db"), fields.get("p95_snr_db"), fields.get("occupancy_pct"),
-             fields.get("width_hz"), fields.get("class")),
+             fields.get("width_hz"), fields.get("class"), fields.get("lat"), fields.get("lon")),
         )
 
     # -- generic ---------------------------------------------------------------------------
