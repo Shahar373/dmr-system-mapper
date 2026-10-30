@@ -151,3 +151,20 @@ def test_sites_that_name_different_sites_are_never_merged(store, cfg):
     site_of = {int(r["freq_hz"]): r["site_id"] for r in store.rows(
         "SELECT c.freq_hz, cs.site_id FROM carrier_sites cs JOIN carriers c ON c.id = cs.carrier_id")}
     assert site_of[469_500_000] == site_of[469_350_000] != site_of[469_650_000]   # the stronger link wins
+
+
+def test_a_neighbour_or_identity_heard_a_handful_of_times_does_not_count(capmax_store, cfg):
+    """Field run: among thousands of short LCs, a few passed their 8-bit CRC by chance and named a
+    site 9 (on LCN 2) and SYS 2111 that do not exist."""
+    store = capmax_store
+    cid = int(store.scalar("SELECT id FROM carriers WHERE freq_hz = ?", (CC_A,)))
+    bad = {"a_type": "adjacent_site", "adj_model": "Large", "adj_net_id": 2, "adj_site_id": 1, "adj_sub_site": 10, "lpcn": 2,
+           "sys_code": "2109"}
+    store.add_csbk_event(cid, NOW - 3000, 1, 1, "tier3_bcast", bad, "bad")
+    store.add_csbk_event(cid, NOW - 3000, 1, 1, "tier3_sys_parms",
+                         {"source": "slc_c_sys_parms", "model": "Large", "net_id": 2, "site_id": 1, "sub_site": 18, "sys_code": "2111"}, "bad")
+    store.commit()
+    run(store, cfg, now=NOW, rebuild=True)
+    labels = [r["label"] for r in store.rows("SELECT label FROM sites")]
+    assert not any(l.startswith("site 9") for l in labels), labels
+    assert "2111" not in (store.scalar("SELECT sys_code FROM systems WHERE variant = 'tier3'") or "")

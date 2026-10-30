@@ -55,6 +55,14 @@ def format_site(number) -> str:
     return "?" if number is None else str(int(number))
 
 
+def _common(counts: dict, share: float = 0.01, least: int = 3) -> dict:
+    """The keys seen at least ``least`` times and ``share`` of the total (all of them when there is little)."""
+    total = sum(counts.values())
+    if total < 10:
+        return dict(counts)
+    return {k: n for k, n in counts.items() if n >= least and n >= share * total}
+
+
 class Context:
     def __init__(self, store: Store, now: int, window_days: int):
         self.store = store
@@ -77,6 +85,8 @@ class Context:
             "SELECT carrier_id, kind, payload, count, last_ts FROM csbk_events WHERE last_ts >= ? AND kind IN ("
             "'capplus_site','capplus_adjacent','conplus_sys','conplus_adjacent','tier3_sys_parms','tier3_bcast',"
             "'xpt_site_status','xpt_adjacent','grant')", (self.since,))
+        adj_counts: dict[int, dict] = defaultdict(dict)     # carrier → Tier III neighbour key → times announced
+        adj_lcns: dict[int, dict] = defaultdict(dict)       # carrier → (net, site) → {lpcn: times}
         for r in rows:
             c = self.carriers.get(int(r["carrier_id"]))
             if c is None:
@@ -106,9 +116,11 @@ class Context:
             elif kind == "tier3_bcast":
                 if p.get("a_type") == "adjacent_site" and p.get("adj_site_id") is not None:
                     net, number = t3_on_air(p.get("adj_net_id"), p["adj_site_id"], p.get("adj_sub_site"))
-                    c.neighbors["tier3"].add((p.get("sys_code"), net, number))
+                    key = (p.get("sys_code"), net, number)
+                    adj_counts[c.id][key] = adj_counts[c.id].get(key, 0) + n
                     if p.get("lpcn"):
-                        c.neighbor_channels[(net, number)] = int(p["lpcn"])
+                        per = adj_lcns[c.id].setdefault((net, number), {})
+                        per[int(p["lpcn"])] = per.get(int(p["lpcn"]), 0) + n
                 if p.get("a_type") == "chan_freq" and p.get("rx_freq_hz"):
                     c.announced_freqs[int(p["rx_freq_hz"])] = {"lpcn": p.get("apcn") or p.get("lpcn"), "sys": p.get("sys_code")}
             elif kind == "xpt_adjacent":
@@ -116,6 +128,17 @@ class Context:
                     c.neighbors["xpt"].add(int(s["site"]))
             elif kind == "grant" and p.get("freq_hz"):
                 c.announced_freqs[int(p["freq_hz"])] = {"lpcn": p.get("lpcn"), "lcn": p.get("lcn"), "sys": None}
+
+        # A Tier III identity or neighbour heard a handful of times among thousands is a short LC whose
+        # 8-bit CRC passed by chance (field run: "site 9", SYS 2111): it counts from 3 times and 1 %
+        for c in self.carriers.values():
+            c.t3_sites = _common(c.t3_sites)
+            adj = _common(adj_counts.get(c.id, {}))
+            if adj:
+                c.neighbors["tier3"] = set(adj)
+            for (net, number), per in adj_lcns.get(c.id, {}).items():
+                if any(k[1] == net and k[2] == number for k in adj):
+                    c.neighbor_channels[(net, number)] = max(per, key=per.get)
 
         # A carrier that is not Capacity Plus can still print an occasional "Capacity Plus Site"
         # line: on the Pi, Cap Max (Tier III) short LCs were decoded as "Site: 0 - Rest LSN: 0".

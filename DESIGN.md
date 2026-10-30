@@ -736,6 +736,9 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   another colour code, are never matched; and sites are built strongest link first without ever
   joining two groups that name different sites on air. `mapper correlate --rebuild` throws the
   automatic evidence away and collects it again (manual evidence and names stay).
+- **Rare Tier III identities.** A short LC's CRC has 8 bits, so among thousands a few wrong ones
+  pass (field run: a neighbour "site 9" on LCN 2, SYS 2111). A carrier's own identity or a
+  neighbour it announces counts from 3 times and 1 % of what it announces.
   Seen in 5 minutes: Aloha (FID 0x00 and 0x10), C_BCAST, Cap Max channel updates (0x21/FID 0x10),
   data and voice grants, C_ACKD.
 - **Activity Update hash** (`rawpdu.address_hash`): CRC-8 of the 16 least significant address
