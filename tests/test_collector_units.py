@@ -91,7 +91,7 @@ def test_survey_analysis_finds_carriers_on_the_raster():
 
 def test_step_centres_cover_the_band():
     c = step_centres(160_000_000, 174_000_000, 2_400_000, 0.8)
-    assert len(c) == 8 and c[0] == 160_960_000 and c[-1] + 960_000 >= 174_000_000
+    assert len(c) == 8 and c[0] == 160_966_250 and c[-1] + 960_000 >= 174_000_000   # half a channel off the raster (DC)
 
 
 def test_sweep_and_record(store, cfg):

@@ -301,7 +301,18 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
         sess = next((x for x in st.sessions(store, 5) if x["id"] == session_id), None)
         if sess and sess["status"] in ("done", "stopped", "failed"):
             print(f"session {session_id} {sess['status']} after {sess['summary'].get('elapsed_s', 0)} s")
-            print(json.dumps(sess["summary"], indent=2)[:4000])
+            print(json.dumps({k: v for k, v in sess["summary"].items() if k != "traceback"}, indent=2)[:4000])
+            if sess["status"] != "failed" and sess["summary"].get("then_decode_s"):
+                # the one-button flow: the daemon queued a decode; follow that one too
+                deadline = time.monotonic() + 60
+                while time.monotonic() < deadline:
+                    nxt = next((x for x in st.sessions(store, 5) if x["id"] > session_id and x["kind"] == "decode"), None)
+                    if nxt is not None:
+                        print(f"decode session {nxt['id']} follows ({sess['summary']['then_decode_s']} s)")
+                        return _follow(store, cfg, int(nxt["id"]))
+                    time.sleep(0.5)
+                print("the queued decode did not start: see `mapper status` and the command log", file=sys.stderr)
+                return 1
             return 0 if sess["status"] != "failed" else 1
         if not s.alive:
             print("daemon went away", file=sys.stderr)

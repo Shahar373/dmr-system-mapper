@@ -43,7 +43,11 @@ log = logging.getLogger("dmr_mapper.daemon")
 
 
 class SessionStop(Exception):
-    pass
+    """The operator (or undervoltage, or the daemon shutting down) ended the session early."""
+
+
+class BudgetDone(SessionStop):
+    """The session used its time budget: a normal end."""
 
 
 class Daemon:
@@ -73,6 +77,9 @@ class Daemon:
         self._last_power = 0.0
         self._store: Store | None = None
         self.gps: Any = NoGps("no session running")
+        self._closing = threading.Event()        # the session thread is past its work, writing up
+        self._stop_reason: str | None = None
+        self._job: threading.Thread | None = None   # correlate / export, off the main loop
 
     # -- main loop ---------------------------------------------------------------------------------
     def _acquire_lock(self) -> None:
@@ -125,6 +132,8 @@ class Daemon:
             if self.session_thread is not None and self.session_thread.is_alive():
                 self.session_stop.set()
                 self.session_thread.join(timeout=15)
+            if self._job is not None and self._job.is_alive():
+                self._job.join(timeout=30)
             st.mark_offline(self._store, self.pid)
             log.info("daemon stopped")
         finally:
@@ -153,6 +162,7 @@ class Daemon:
             if self.session_thread is not None and self.session_thread.is_alive() and self.power.undervolt_now \
                     and (self.cfg.get("power", {}) or {}).get("stop_on_undervoltage", True):
                 self.message = "stopping session: undervoltage reported by the firmware"
+                self._stop_reason = "undervoltage"
                 self.session_stop.set()
         if self.session_thread is None or not self.session_thread.is_alive():
             if self.session_thread is not None:
@@ -168,10 +178,13 @@ class Daemon:
             if cmd is None:
                 break
             try:
-                ok, result = self._handle(cmd)
+                res = self._handle(cmd)
             except Exception as exc:  # noqa: BLE001 - a bad command must not kill the daemon
-                ok, result = False, f"{type(exc).__name__}: {exc}"
+                res = (False, f"{type(exc).__name__}: {exc}")
                 log.exception("command %s failed", cmd["kind"])
+            if res is None:
+                continue                      # a worker finishes it
+            ok, result = res
             (log.info if ok else log.warning)("command %s from %s: %s", cmd["kind"], cmd.get("source"), result)
             st.finish_command(self._store, int(cmd["id"]), ok, result)
         with self._lock:
@@ -209,10 +222,14 @@ class Daemon:
         return status
 
     # -- commands ----------------------------------------------------------------------------------
-    def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str]:
+    def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str] | None:
         assert self._store is not None
         kind, params = cmd["kind"], cmd.get("params") or {}
         if kind in ("start_survey", "start_decode"):
+            if self.session_thread is not None and self.session_thread.is_alive() and self._closing.is_set():
+                # the previous session is only writing its summary (the one-button flow queues the
+                # decode from there): wait for it instead of refusing
+                self.session_thread.join(timeout=30)
             if self.session_thread is not None and self.session_thread.is_alive():
                 return False, f"a {self.session_kind} session is already running (#{self.session_id}); stop it first"
             if kind == "start_decode" and find_dsd_fme(self.cfg) is None:
@@ -238,6 +255,8 @@ class Daemon:
             sid = st.create_session(self._store, session_kind, str(cmd.get("source", "?")), params, budget)
             self.session_id, self.session_kind, self.mode = sid, session_kind, session_kind
             self.session_stop.clear()
+            self._closing.clear()
+            self._stop_reason = None
             self.progress = {"kind": session_kind, "phase": "starting"}
             self.message = f"{session_kind} session #{sid} started ({budget // 60} min budget, {self.power.short()})"
             self.session_thread = threading.Thread(target=self._session_main, args=(sid, session_kind, params, budget, source),
@@ -247,19 +266,43 @@ class Daemon:
         if kind == "stop":
             if self.session_thread is None or not self.session_thread.is_alive():
                 return True, "nothing running"
+            self._stop_reason = f"stopped by {cmd.get('source', '?')}"
             self.session_stop.set()
             self.message = "stop requested"
             return True, f"stopping session {self.session_id}"
-        if kind == "correlate":
-            from ..correlate import run as correlate
-            rep = correlate(self._store, self.cfg)
-            return True, f"links {rep.links_scored} ({rep.links_by_label}), sites {rep.sites}, systems {rep.systems}"
-        if kind == "export":
-            from ..export.report import export_all
-            paths, g = export_all(self._store, self.cfg, Path(params["dir"]) if params.get("dir") else None,
-                                  str(params.get("min_label", "weak")))
-            return True, f"wrote {paths[0].parent}/ (map.html, map.json, map.graphml, systems.txt; {g.number_of_nodes()} nodes, {g.number_of_edges()} edges)"
+        if kind in ("correlate", "export"):
+            # can take a while on a big database: run it beside the main loop so the heartbeat and
+            # the stop key keep working; the worker finishes the command itself
+            if self._job is not None and self._job.is_alive():
+                return False, "a correlate or export is already running"
+            self._job = threading.Thread(target=self._job_main, args=(cmd,), name=f"job-{kind}", daemon=True)
+            self._job.start()
+            return None
         return False, f"unknown command {kind}"
+
+    def _job_main(self, cmd: dict[str, Any]) -> None:
+        kind, params = cmd["kind"], cmd.get("params") or {}
+        store = Store(self.db_path)
+        try:
+            if kind == "correlate":
+                from ..correlate import run as correlate
+                rep = correlate(store, self.cfg)
+                ok, result = True, f"links {rep.links_scored} ({rep.links_by_label}), sites {rep.sites}, systems {rep.systems}"
+            else:
+                from ..export.report import export_all
+                paths, g = export_all(store, self.cfg, Path(params["dir"]) if params.get("dir") else None,
+                                      str(params.get("min_label", "weak")))
+                ok, result = True, (f"wrote {paths[0].parent}/ (map.html, map.json, map.graphml, systems.txt;"
+                                    f" {g.number_of_nodes()} nodes, {g.number_of_edges()} edges)")
+        except Exception as exc:  # noqa: BLE001
+            store.rollback()
+            ok, result = False, f"{type(exc).__name__}: {exc}"
+            log.exception("%s failed", kind)
+        try:
+            (log.info if ok else log.warning)("command %s from %s: %s", kind, cmd.get("source"), result)
+            st.finish_command(store, int(cmd["id"]), ok, result)
+        finally:
+            store.close()
 
     # -- sessions ----------------------------------------------------------------------------------
     def _set_progress(self, **kw: Any) -> None:
@@ -282,14 +325,17 @@ class Daemon:
                 self._survey(store, source, params, budget_s, t0, summary)
             else:
                 self._decode(store, source, params, budget_s, t0, summary)
+        except BudgetDone:
+            summary["ended"] = "time budget used"
         except SessionStop:
             status = "stopped"
-            summary["stopped"] = self.message or "stop requested"
+            summary["stopped"] = self._stop_reason or ("daemon shutting down" if self.stop_event.is_set() else "stop requested")
         except Exception as exc:  # noqa: BLE001
             status = "failed"
             summary["error"] = f"{type(exc).__name__}: {exc}"
             summary["traceback"] = traceback.format_exc()[-1500:]
         finally:
+            self._closing.set()
             if source is not None:
                 try:
                     source.close()
@@ -337,7 +383,7 @@ class Daemon:
         if self.stop_event.is_set() or self.session_stop.is_set():
             raise SessionStop()
         if time.monotonic() - t0 >= budget_s:
-            raise SessionStop()
+            raise BudgetDone()
 
     def _after_session(self, store: Store, kind: str, params: dict[str, Any], summary: dict[str, Any]) -> None:
         dcfg = self.cfg.get("daemon", {}) or {}
@@ -353,7 +399,8 @@ class Daemon:
             from ..correlate import run as correlate
             rep = correlate(store, self.cfg)
             summary["correlate"] = {"links": rep.links_scored, "by_label": rep.links_by_label, "sites": rep.sites, "systems": rep.systems}
-        if kind == "survey" and params.get("then_decode") and not self.session_stop.is_set() and not self.stop_event.is_set():
+        if (kind == "survey" and params.get("then_decode") and "error" not in summary
+                and not self.session_stop.is_set() and not self.stop_event.is_set()):
             # one button, one budget: the decode gets what the survey left over
             total = int(params.get("total_budget_s") or summary.get("budget_s") or 0)
             remaining = int(params.get("decode_budget_s") or (total - summary.get("elapsed_s", 0)))
@@ -504,13 +551,12 @@ class Daemon:
 
     @staticmethod
     def _drain(lines: "queue.Queue[tuple[int, str | None]]", ingests: dict[int, CarrierIngest], final: bool = False) -> None:
-        deadline = time.monotonic() + (2.0 if final else 0.0)
+        """Feed queued lines to their carriers. The final call comes after every decoder was stopped
+        and its reader thread joined, so everything is already queued: empty means done."""
         while True:
             try:
-                f, line = lines.get(timeout=0.2 if final else 0.0) if final else lines.get_nowait()
+                f, line = lines.get_nowait()
             except queue.Empty:
-                if final and time.monotonic() < deadline:
-                    continue
                 break
             if line is None:
                 continue

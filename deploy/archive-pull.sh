@@ -12,7 +12,7 @@
 # Safe to run often (cron every few hours): the mapper Pi is often off or out of reach in the field;
 # rsync copies only what changed. Each pulled file is integrity-checked; a bad one is set aside.
 set -euo pipefail
-SRC="${1:?source, e.g. shahar@mapper-pi:}"
+SRC="${1:?source, e.g. <user>@<mapper-host>:}"
 DEST="${2:?destination folder}"
 DAILY="${3:-14}"
 WEEKLY="${4:-8}"

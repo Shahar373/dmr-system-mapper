@@ -40,6 +40,10 @@ def same_site(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
         ta, tb = ctx.t3_identity(a), ctx.t3_identity(b)
         if ta is not None and tb is not None:
             same_sys = _t3_same_system(ctx, a, b, ta, tb)
+            if same_sys and ta[2] == tb[2] and ta[0] and tb[0] and ta[0] != tb[0]:
+                # same Net ID and site number but a different SYS code: the code is derived from net
+                # and site, so these are two networks that happen to reuse the numbers
+                continue
             if same_sys and ta[2] == tb[2]:
                 # the SYS code carries the site too, so equal codes corroborate; a traffic channel
                 # whose short LC has no SYS code only knows Net/Site

@@ -129,6 +129,20 @@ def _score(t: Target, now: int) -> None:
     t.score = s
 
 
+DC_GUARD_HZ = 25_000     # no carrier closer than this to the tuned frequency
+
+
+def off_dc(center: int, freqs: list[int], usable: float) -> int:
+    """Move the tuned frequency so no carrier sits on the receiver's DC point (a zero-IF receiver
+    like the RSP1B has a spike and LO leakage there), keeping every carrier inside the slice."""
+    half = usable / 2
+    for shift in (0, 100_000, -100_000, 200_000, -200_000, 300_000, -300_000, 50_000, -50_000):
+        c = center + shift
+        if all(abs(f - c) >= DC_GUARD_HZ and abs(f - c) <= half for f in freqs):
+            return c
+    return center
+
+
 def plan(targets: list[Target], cfg: dict[str, Any], max_instances: int, sample_rate: float | None = None) -> list[Slice]:
     sdr = cfg.get("sdr", {}) or {}
     fs = float(sample_rate or sdr.get("sample_rate_hz", 2_000_000))
@@ -163,6 +177,7 @@ def plan(targets: list[Target], cfg: dict[str, Any], max_instances: int, sample_
         if span > usable:
             chosen = chosen[:1]
             center = chosen[0].freq_hz
+        center = off_dc(center, [t.freq_hz for t in chosen], usable)
         keys = [t.group_key() for t in chosen]
         grouped = any(k is not None and keys.count(k) >= 2 for k in keys)
         reason = "same-site group, long dwell" if grouped else ("never decoded" if any("never decoded" in t.reasons for t in chosen) else "refresh")

@@ -39,7 +39,8 @@ class Store:
         self.conn = sqlite3.connect(str(self.path) if self.path else ":memory:")
         self.conn.row_factory = sqlite3.Row
         self.conn.execute("PRAGMA foreign_keys = ON")
-        self.conn.execute("PRAGMA busy_timeout = 10000")
+        # the daemon, its session and job threads, the console and the nightly job share one file
+        self.conn.execute("PRAGMA busy_timeout = 30000")
         if self.path is not None:
             # Switching the journal mode needs the file to itself and ignores busy_timeout; another
             # process may be creating the schema at this very moment (daemon and TUI started together).

@@ -218,35 +218,42 @@ class SoapySource:
         # (the Pi's, Debian trixie) fail with "make() no match" although enumerate() finds the device
         # with the same dict. The surveyor hit the same thing (capture/device.py).
         self.dev = SoapySDR.Device(device_args_string(device_args))
+        self.stream = None
         try:
-            rates = [float(r) for r in self.dev.listSampleRates(SOAPY_SDR_RX, 0)]
-        except Exception:  # noqa: BLE001
-            rates = []
-        if rates and self.sample_rate not in rates:
-            # e.g. the SDRplay driver offers 2, 2.048, 3 ... MS/s but not 2.4: take the closest it has
-            from .channelizer import pick_decimation
-            usable = []
-            for r in rates:
-                try:
-                    pick_decimation(r)
-                    usable.append(r)
-                except ValueError:
-                    pass
-            if not usable:
-                raise RuntimeError(f"none of the driver's sample rates {rates} can be channelised")
-            self.requested_rate = self.sample_rate
-            self.sample_rate = min(usable, key=lambda r: abs(r - self.requested_rate))
-        self.dev.setSampleRate(SOAPY_SDR_RX, 0, self.sample_rate)
-        gain = scfg.get("gain", {}) or {}
-        if gain.get("agc"):
-            self.dev.setGainMode(SOAPY_SDR_RX, 0, True)
-        else:
-            self.dev.setGainMode(SOAPY_SDR_RX, 0, False)
-            for name, key in (("IFGR", "ifgr"), ("RFGR", "lna_state")):
-                if key in gain and name in list(self.dev.listGains(SOAPY_SDR_RX, 0)):
-                    self.dev.setGain(SOAPY_SDR_RX, 0, name, float(gain[key]))
-        self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
-        self.dev.activateStream(self.stream)
+            try:
+                rates = [float(r) for r in self.dev.listSampleRates(SOAPY_SDR_RX, 0)]
+            except Exception:  # noqa: BLE001
+                rates = []
+            if rates and self.sample_rate not in rates:
+                # e.g. the SDRplay driver offers 2, 2.048, 3 ... MS/s but not 2.4: take the closest it has
+                from .channelizer import pick_decimation
+                usable = []
+                for r in rates:
+                    try:
+                        pick_decimation(r)
+                        usable.append(r)
+                    except ValueError:
+                        pass
+                if not usable:
+                    raise RuntimeError(f"none of the driver's sample rates {rates} can be channelised")
+                self.requested_rate = self.sample_rate
+                self.sample_rate = min(usable, key=lambda r: abs(r - self.requested_rate))
+            self.dev.setSampleRate(SOAPY_SDR_RX, 0, self.sample_rate)
+            gain = scfg.get("gain", {}) or {}
+            if gain.get("agc"):
+                self.dev.setGainMode(SOAPY_SDR_RX, 0, True)
+            else:
+                self.dev.setGainMode(SOAPY_SDR_RX, 0, False)
+                for name, key in (("IFGR", "ifgr"), ("RFGR", "lna_state")):
+                    if key in gain and name in list(self.dev.listGains(SOAPY_SDR_RX, 0)):
+                        self.dev.setGain(SOAPY_SDR_RX, 0, name, float(gain[key]))
+            self.stream = self.dev.setupStream(SOAPY_SDR_RX, SOAPY_SDR_CF32)
+            self.dev.activateStream(self.stream)
+        except Exception:
+            # never leave the receiver selected after a failed setup: the SDRplay API would keep
+            # it from every other program until this process ends
+            self._release()
+            raise
         self._mtu = int(self.dev.getStreamMTU(self.stream))
         self._buf = np.empty(self._mtu, dtype=np.complex64)
         self.overflows = 0
@@ -277,12 +284,27 @@ class SoapySource:
                 raise RuntimeError(f"receiver stream error {sr.ret}")
         return out
 
-    def close(self) -> None:
+    def _release(self) -> None:
+        dev, self.dev = getattr(self, "dev", None), None
+        if dev is None:
+            return
         try:
-            self.dev.deactivateStream(self.stream)
-            self.dev.closeStream(self.stream)
+            if self.stream is not None:
+                try:
+                    dev.deactivateStream(self.stream)
+                finally:
+                    dev.closeStream(self.stream)
+        except Exception:  # noqa: BLE001
+            pass
         finally:
-            self.dev = None
+            # SoapySDR's Python Device releases the hardware in its __del__ (it calls unmake): drop
+            # the last reference here instead of calling unmake ourselves, which would do it twice.
+            # A failed __init__ must not leave the device reachable from the exception either.
+            self.stream = None
+            del dev
+
+    def close(self) -> None:
+        self._release()
 
 
 class SoapyBackend:

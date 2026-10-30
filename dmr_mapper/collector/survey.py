@@ -37,7 +37,8 @@ class SurveyHit:
 def step_centres(start_hz: int, stop_hz: int, sample_rate: float, usable_fraction: float) -> list[float]:
     usable = sample_rate * usable_fraction
     centres = []
-    c = start_hz + usable / 2
+    # half a 12.5 kHz channel off the raster: the receiver's DC point falls between two channels
+    c = start_hz + usable / 2 + 6_250
     while c - usable / 2 < stop_hz:
         centres.append(c)
         c += usable
@@ -65,6 +66,13 @@ def analyse_block(x: np.ndarray, sample_rate: float, center_hz: float, raster_hz
         psds.append(np.fft.fftshift(P.mean(axis=0)))
     if not psds:
         return []
+    # the DC spike / LO leakage of a zero-IF receiver: replace the few bins around the tuned
+    # frequency with the local noise level so it is not reported as a carrier
+    dc = np.abs(freqs - center_hz) <= 1_500
+    if dc.any():
+        ring = (np.abs(freqs - center_hz) > 1_500) & (np.abs(freqs - center_hz) <= 12_000)
+        for psd in psds:
+            psd[dc] = np.median(psd[ring]) if ring.any() else np.median(psd)
     P = np.array(psds)                                   # (nseg, nfft)
     # raster channels inside the usable window
     first = int(np.ceil((center_hz - usable) / raster_hz)) * raster_hz
