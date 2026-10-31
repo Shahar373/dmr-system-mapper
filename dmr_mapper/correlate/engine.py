@@ -129,20 +129,46 @@ def find_link(store: Store, a_freq: int, b_freq: int, kind: str | None = None) -
 
 
 def propose(store: Store, a_freq: int, b_freq: int, kind: str, confidence: float, note: str,
-            config: dict[str, Any] | None, now: int | None = None) -> dict[str, Any]:
-    """Manual evidence from an operator or from Claude via MCP. Stored with source='manual' and
-    never decayed or overwritten by the automatic pass."""
+            config: dict[str, Any] | None, now: int | None = None, source: str = "manual") -> dict[str, Any]:
+    """Manual evidence from the operator (``source='manual'``) or a proposal from Claude via MCP
+    (``source='mcp'``, which scoring never lets confirm a link or lift the Tier II cap by itself).
+    Never decayed or overwritten by the automatic pass; a new proposal for the same link and
+    source replaces the previous one."""
     cfg = ScoringConfig(config)
     now = int(now if now is not None else time.time())
+    if source not in ("manual", "mcp"):
+        raise ValueError(f"source must be manual or mcp, got {source!r}")
     a = store.conn.execute("SELECT id FROM carriers WHERE freq_hz = ?", (a_freq,)).fetchone()
     b = store.conn.execute("SELECT id FROM carriers WHERE freq_hz = ?", (b_freq,)).fetchone()
     if a is None or b is None:
         raise KeyError("both carriers must exist in the database before a link can be proposed")
+    if a_freq == b_freq:
+        raise ValueError("a link needs two different carriers")
     if kind not in ("same_site", "same_system", "neighbor_site"):
         raise ValueError(f"kind must be same_site, same_system or neighbor_site, got {kind!r}")
     link_id = _link_id(store, int(a["id"]), int(b["id"]), kind, now)
     ev = Evidence(a_freq, b_freq, kind, "manual", max(0.0, min(1.0, float(confidence))), now, now, 1, {"note": note})
-    upsert_evidence(store, link_id, ev, cfg, source="manual")
+    upsert_evidence(store, link_id, ev, cfg, source=source)
     res = score_link(store, link_id, cfg, now)
     store.commit()
     return {"link_id": link_id, **res}
+
+
+def withdraw(store: Store, a_freq: int, b_freq: int, kind: str | None, config: dict[str, Any] | None,
+             source: str = "mcp", now: int | None = None) -> list[dict[str, Any]]:
+    """Remove the evidence ``source`` gave for the links between two carriers and rescore them; a
+    link left with no evidence at all is deleted."""
+    cfg = ScoringConfig(config)
+    now = int(now if now is not None else time.time())
+    out = []
+    for link_id in find_link(store, a_freq, b_freq, kind):
+        n = store.conn.execute("DELETE FROM evidence WHERE link_id = ? AND source = ?", (link_id, source)).rowcount
+        if not n:
+            continue
+        if store.scalar("SELECT COUNT(*) FROM evidence WHERE link_id = ?", (link_id,)):
+            out.append({"link_id": link_id, "removed": n, **score_link(store, link_id, cfg, now)})
+        else:
+            store.conn.execute("DELETE FROM links WHERE id = ?", (link_id,))
+            out.append({"link_id": link_id, "removed": n, "deleted": True})
+    store.commit()
+    return out

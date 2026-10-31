@@ -137,6 +137,18 @@ archive:                       # the archive Pi PULLS paths.snapshots (deploy/ar
   snapshot_time: "03:30"       # local time of the nightly snapshot + export (systemd timer; runs at boot if missed)
   keep_local: 3                # snapshots kept on this Pi (SD card); the archive keeps its own history
 
-mcp:
-  bind: 100.64.0.1             # the Pi's Tailscale address; set it in config.local.yaml
+mcp:                           # mapper serve-mcp: Claude Code on the laptop over Tailscale (Phase 5, DEPLOY.md §6)
+  enabled: false               # deploy.sh installs and starts dmr-mapper-mcp.service only when true
+  bind: 127.0.0.1              # set the Pi's Tailscale address (tailscale ip -4) in config.local.yaml; no token:
+                               # anything but loopback or a Tailscale address is refused (unless allow_any_bind: true)
   port: 8765
+  allowed_hosts: []            # other names the laptop may use for the Pi in the URL, e.g. its MagicDNS name
+  approval: ask                # scans (survey, decode, watch) need your approval:
+                               #   ask: a yes/no dialog in Claude Code; if the client cannot show one, as console
+                               #   console: always y in `mapper tui` or `mapper approve` on the Pi
+                               #   none: no approval here (Claude Code's own permission prompt is the only gate)
+  approval_timeout_min: 10     # a request nobody approved by then expires
+  default_session_minutes: 10  # budget of a session Claude asks for without giving one
+  max_session_minutes: 30      # the most Claude may ask for
+  max_proposal_confidence: 0.8 # the most a link proposed by Claude counts for (it never confirms a link by itself)
+  show_radio_ids: false        # false: radio IDs reach Claude as pseudonyms (talkgroups are shown)

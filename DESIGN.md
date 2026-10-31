@@ -47,9 +47,9 @@ RF  →  survey (carrier list)  →  DSD-FME per carrier  →  line parser  → 
                                               CLI reports, HTML graph, MCP server (Claude)
 ```
 
-Deterministic code does all decoding and correlation. Claude, through MCP, drives surveys,
-inspects evidence and may *propose* links; a proposal is just one more evidence row with
-`source = manual`.
+Deterministic code does all decoding and correlation. Claude, through MCP, asks for surveys
+(each one approved by the operator), inspects evidence and may *propose* links; a proposal is just
+one more evidence row, with `source = mcp`.
 
 ## 2. Components and data flow
 
@@ -72,7 +72,9 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
 - **One control channel.** Clients only insert rows into `commands` (`start_survey`, `start_decode`,
   `start_watch`, `stop`, `correlate`, `export`) and read `daemon_state` and `sessions`. The daemon claims commands
   atomically, writes a heartbeat every tick, and is the only process that opens the receiver. A
-  console, the CLI and the MCP server therefore can never fight over the tuner.
+  console, the CLI and the MCP server therefore can never fight over the tuner. A session Claude
+  asks for is inserted as `awaiting_approval`, which the daemon never takes, until the operator
+  approves it (Phase 5, §10).
 - **One daemon per database**, enforced by an `flock` on `<db>.daemon.lock` (released by the kernel
   if the process dies).
 - **Before a session**: the receiver is probed (present / absent / busy, with the name of a running
@@ -458,7 +460,7 @@ belong to a **class** that carries the config weight and decay constant.
 | `identity_talkgroup` | identity | 0.15 | `min(1, shared_tgs / 3)` | `same_system` | the same TG on both carriers within 24 h (low: TG numbers are reused across unrelated systems) |
 | `identity_slco` | identity | 0.20 | `min(1, shared_payloads / 3)` | `same_system` | the same short-LC content repeated ≥ 3 times on both carriers, same colour code: an Activity Update (slot activity + hashed address, from DSD-FME's line or from an old `SLCO Completed Block` row: both give one text), an SLCO nothing decodes (`slco <opcode> <data>`, old or new rows; Cap Max 0xF bits); all-idle updates and short LCs decoded explicitly elsewhere are left out, and so is an Activity Update whose hashes are those of talkgroups both carriers were heard carrying (already `identity_talkgroup`); a carrier's count of one content is the largest over the forms it was stored in (old databases hold the line and its block); content present on more than max(4, half) of the carriers counts as a vendor default. Field run 2026-10-30: two VHF Tier II repeaters shared two Activity Updates (the same hashed talkgroups) |
 | `rf_profile` | rf | 0.10 | correlation of activity-per-bucket profiles (Pearson over ≥ 24 shared buckets, clipped to 0..1), only when colour codes match | `same_system` | observations |
-| `manual` | manual | 1.00 | as given by `propose_link` (0..1) | any | MCP / CLI |
+| `manual` | manual | 1.00 | as given (0..1): `mapper propose` (`source = manual`), or Claude's `propose_link` (`source = mcp`, at most `mcp.max_proposal_confidence`, 0.8) | any | CLI / MCP |
 
 Tier II specific rule: a link whose evidence is only `identity_*` (radio, talkgroup, SLCO) and `rf_profile` is marked
 `tier2_only = 1` and its score is capped at `tier2_max_confidence` (0.60). Such links can never be
@@ -493,7 +495,10 @@ if tier2_only: score = min(score, tier2_max_confidence)
 ```
 
 Labels (lower bounds from config): `confirmed ≥ 0.85` **and at least one explicit or manual
-evidence row**, `probable ≥ 0.60`, `possible ≥ 0.30`, otherwise `weak`. `weak` links are stored
+evidence row**, `probable ≥ 0.60`, `possible ≥ 0.30`, otherwise `weak`. A proposal from Claude
+(`source = mcp`) adds to `positive` but is judgement, not the operator's word: it never counts as
+the explicit row `confirmed` needs, and it is left out when deciding `tier2_only`, so it never lifts
+the Tier II cap (a link with only a proposal is not Tier II, and stays below `confirmed`). `weak` links are stored
 (so `explain` can show why they are weak) but hidden from the default graph.
 
 Worked example from the samples. Carriers A (168.863 MHz, Cap+ site 2) and B (hypothetical
@@ -569,7 +574,7 @@ written from the DSD-FME source print formats and unit-tested on synthetic lines
 
 ## 7. Component interfaces
 
-Package `dmr_mapper` (Python 3.11+, stdlib + `pyyaml`, `networkx`; `mcp` only for Phase 4;
+Package `dmr_mapper` (Python 3.11+, stdlib + `pyyaml`, `networkx`; `mcp` 2.x only for Phase 5;
 `numpy`/`SoapySDR` only on the Pi for Phase 3).
 
 ```python
@@ -619,7 +624,8 @@ def write(graph, path)                                      # single static HTML
 # dmr_mapper/collector/watch.py (Phase 4)  plan_watch, KeyupDetector, InstancePlanner; Daemon._watch drives them
 # dmr_mapper/ingest/rawpdu.py   (Phase 4)  CRCs, CSBK / short-LC bit fields from DSD-FME's -Z bytes
 # dmr_mapper/correlate/evidence/capmax.py, correlate/names.py (Phase 4)
-# dmr_mapper/mcp/server.py (Phase 5)
+# dmr_mapper/mcp/tools.py  (Phase 5)  MapperTools: every tool as a plain function over the store and the queue
+# dmr_mapper/mcp/server.py (Phase 5)  build_server (MCPServer, annotations, approval resolvers), check_bind, serve
 ```
 
 CLI (`mapper`, argparse):
@@ -632,7 +638,7 @@ mapper explain <link-id | freqA freqB>
 mapper export [--html PATH] [--graphml PATH] [--min-label possible]
 mapper daemon | tui | survey | decode | stop | doctor | capture-iq   (Phase 3a)
 mapper watch [FREQ ...] [--center HZ] [--minutes N] | name system|site TARGET NAME [--clear] | names   (Phase 4)
-mapper serve-mcp (Phase 5)
+mapper serve-mcp [--bind IP] [--port N] | requests | approve [ID] | refuse [ID]   (Phase 5)
 ```
 
 ## 8. Configuration
@@ -667,26 +673,63 @@ folder with a key restricted to read-only rsync of it, and keeps 14 daily + 8 we
 
 ## 10. MCP tools (Phase 5)
 
-Transport: streamable HTTP (`mcp` Python SDK), bound to the Pi's Tailscale address only, no
-token (the tailnet is the trust boundary). All tools return JSON; long operations return a job id
-that `get_status` reports on.
+`mapper serve-mcp` (`dmr_mapper/mcp/`, service `dmr-mapper-mcp`, DEPLOY.md §6). Transport:
+streamable HTTP at `/mcp` (`mcp` Python SDK 2.x, `MCPServer`), bound to the Pi's Tailscale address
+only (`mcp.bind`; anything but 100.64.0.0/10, the Tailscale IPv6 prefix or loopback is refused
+unless `mcp.allow_any_bind`), no token: the tailnet is the trust boundary. DNS-rebinding
+protection accepts only the bind address and `mcp.allowed_hosts` in the `Host` header. The server is
+a process of its own: it reads the database and posts commands, and never opens the receiver. All
+tools return JSON; frequencies are accepted in Hz or MHz (< 10 000 = MHz) and matched to the nearest
+known carrier within `raster_tolerance_hz`. Times are ISO 8601 in `timezone`.
 
-| Tool | Signature | Returns |
+| Tool | Arguments | Returns |
 |---|---|---|
-| `scan_band` | `(band: str \| None, start_hz: int \| None, stop_hz: int \| None, dwell_s: float = 3)` | `{run_id, hits: [{freq_hz, snr_db, occupancy_pct, class}], duration_s}` |
-| `list_carriers` | `(band: str \| None = None, since_hours: int = 24, min_snr_db: float \| None = None, variant: str \| None = None)` | `[{freq_hz, variant, dominant_cc, last_seen, activity_summary, site, system}]` |
-| `decode_channel` | `(freq_hz: int, seconds: int = 60)` | fingerprint summary of a fresh decode: bursts, CSBK kinds seen, site/system IDs, identities, unrecognized lines |
-| `get_fingerprint` | `(freq_hz: int, days: int = 7)` | everything the DB knows about the carrier: variant, CC, site, LCN, neighbours, identities, activity profile |
-| `query_systems` | `(system_id: int \| None = None, freq_hz: int \| None = None, min_confidence: float = 0.3)` | systems → sites → carriers with link scores and labels |
-| `explain_link` | `(link_id: int \| None, a_freq_hz: int \| None, b_freq_hz: int \| None)` | evidence rows with raw, weight, decay, contribution |
-| `propose_link` | `(a_freq_hz: int, b_freq_hz: int, kind: str, confidence: float, note: str)` | writes a `manual` evidence row, reruns scoring for that pair, returns the new link |
-| `correlate_now` | `()` | `CorrelateReport` |
-| `get_status` | `()` | collector state, current decode queue, DB size, last survey, last archive sync |
+| `get_status` | – | daemon (mode, receiver, power, progress, message), last 5 sessions, requests awaiting approval, approval settings, DB counts and links by label, latest survey per band, snapshots, configured bands |
+| `list_carriers` | `band?, since_hours = 168, min_snr_db?, variant?, limit = 200` | carriers: variant, CC, first/last seen, decode seconds, bursts, key-ups, best SNR (survey or decode), site / system / LCN |
+| `get_fingerprint` | `freq, days = 7` | activity counters and CC histogram, event kinds with counts and their 3 most frequent payloads, talkgroups and (pseudonymous) radios, key-ups, decode runs, latest survey hit, unrecognized line patterns, links |
+| `list_survey_hits` | `band?, run_id?, min_snr_db?, limit = 200` | hits of the latest run per band (or of one run) with the variant of the known carrier there |
+| `query_systems` | `system_id?, freq?, min_confidence = 0.3` | systems → sites → carriers (LCN, confidence), links among them with score, label, `tier2_only` |
+| `explain_link` | `link_id?` or `a_freq, b_freq, kind?` | `mapper explain` as JSON: every evidence row with raw, weight, decay, contribution, support, source, details |
+| `get_session` | `session_id?, request_id?, wait_s = 0` (≤ 55) | a session's state, params and summary (trimmed to ~24 KB), live progress while it runs; or what became of a request |
+| `propose_link` | `a_freq, b_freq, kind, confidence (0..1], note` | manual evidence with `source = mcp` (replaces Claude's earlier one for that link), rescored link |
+| `withdraw_proposal` | `a_freq, b_freq, kind?` | Claude's evidence removed, links rescored (deleted when nothing is left) |
+| `correlate_now` | – | through the daemon's `correlate` command when it runs, else in-process: the report |
+| `scan_band` | `band?, start?, stop?, minutes?, then_decode = false` | request: `{request_id, status, what, session_id?}`. `start..stop` must lie inside one configured band (`band_for_range`) |
+| `decode_carriers` | `freqs?, minutes?` | request (none: plan from the latest survey) |
+| `watch_slice` | `freqs?, center?, minutes?` | request |
+| `stop_session` | – | the `stop` command's result |
 
-Guard rails: `propose_link` and `correlate_now` are the only writers; `decode_channel` and
-`scan_band` preempt the collector's queue for the requested duration and then hand the tuner back.
+Read tools carry `readOnlyHint`; the scan tools `openWorldHint`.
 
-`.mcp.json` on the laptop (Phase 5):
+**Approval of scans** (`mcp.approval`). A scan tool first checks that a session could start now
+(daemon alive and idle, receiver not absent or busy, no other request waiting, budget within
+`mcp.max_session_minutes`, default `default_session_minutes`, band plan): a refusal is the answer
+and nobody is asked. Then:
+
+- `ask` (default): an elicitation, a yes/no form in Claude Code that the person answers, not the
+  model. It is a resolver (`Resolve` → `Elicit`), so the SDK carries it as the negotiated protocol
+  wants: a server-to-client request in the middle of the call up to 2025-11-25, an
+  `InputRequiredResult` round from 2026-07-28. Only an answer with `approve: true` approves: a
+  resolver that asks nothing (client without elicitation) still reaches the tool as an "accept"
+  without data, and is treated as "no dialog". Accept → the command is posted (`params.approved_by`);
+  decline or cancel → nothing is posted, and the model is told not to retry without asking. No
+  dialog → as `console`.
+- `console`: the command is inserted as `awaiting_approval`; the console shows
+  `Claude asks #N: …` (`y` approve, `v` refuse), the shell has `mapper requests | approve | refuse`.
+  Approval turns it `pending`, refusal `refused`; unanswered after `approval_timeout_min` it becomes
+  `expired`. Approving while the daemon is down is refused, and the daemon itself refuses an `mcp`
+  session command older than the timeout + 2 min.
+- `none`: posted at once; the client's own permission prompt is the only gate.
+
+`stop_session` needs no approval: it only gives the receiver back.
+
+**Privacy.** Radio ids (payload keys `src`, `radio`, `ip`; `tgt` of private calls and
+individually addressed preambles; the ids in `identity_radio` details) become `radio-xxxxxx`, a
+salted hash stable for the life of the server process, unless `mcp.show_radio_ids`. Talkgroups are
+shown. Unrecognized lines are given as their digit-masked patterns, never examples.
+
+On the laptop, `claude mcp add --transport http dmr-mapper http://<pi-tailscale-ip>:8765/mcp`, or a
+`.mcp.json` in the folder Claude Code runs from (never in this repository):
 
 ```json
 { "mcpServers": { "dmr-mapper": { "type": "http", "url": "http://<pi-tailscale-ip>:8765/mcp" } } }
@@ -695,20 +738,25 @@ Guard rails: `propose_link` and `correlate_now` are the only writers; `decode_ch
 ## 11. Repository layout
 
 ```
-dmr_mapper/            package (phases 1–4)
+dmr_mapper/            package (phases 1–5)
   cli.py  config.py
   db/        store.py  migrations/
   ingest/    dsdfme.py  surveyor.py  writer.py  events.py
   correlate/ engine.py  evidence/*.py  derive.py
   export/    graph.py  html.py
-  collector/ (Phase 3a; watch.py Phase 4)  tui/ (Phase 3a)  mcp/ (Phase 5)
+  collector/ (Phase 3a; watch.py Phase 4)  tui/ (Phase 3a)  mcp/ tools.py server.py (Phase 5)
 tests/                 pytest, fixtures from samples/ + tests/fixtures/synthetic/
 samples/               checked-in DSD-FME logs (see README)
-deploy/                systemd unit templates, deploy.sh, archive-pull.sh (Phase 3b)
+deploy/                systemd unit templates (dmr-mapper-mcp.service.in: Phase 5), deploy.sh, archive-pull.sh (Phase 3b)
 DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 ```
 
 ## 12. Open points and known limits
+
+- **MCP not yet used from the laptop.** The server is tested in-process with the SDK's client over
+  both protocol generations (including the approval dialog) and over HTTP on loopback. Whether the
+  installed Claude Code shows the elicitation dialog is checked on first use; if it does not, the
+  request waits in the console (`mcp.approval: console` makes that the rule).
 
 - **No rf evidence fixture.** `samples/surveyor` has no candidate list with SNR. `rf_profile`
   is implemented against `observations` and tested synthetically; its weight is deliberately low.

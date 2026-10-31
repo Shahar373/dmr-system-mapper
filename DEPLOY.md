@@ -46,7 +46,7 @@ device directly, the mapper stays away from it and asks for gpsd, which shares o
 ## 2. Daily use
 
 ```sh
-mapper tui                        # the console: a survey+decode, s survey, d decode, w watch, x stop, c correlate, e export, n name, q quit
+mapper tui                        # the console: a survey+decode, s survey, d decode, w watch, x stop, c correlate, e export, n name, y/v approve/refuse Claude, q quit
 mapper status                     # one-shot summary
 mapper watch --minutes 20         # Capacity Max: one slice, the control channel and every traffic channel that keys up
 journalctl -u dmr-mapper -f       # what the daemon is doing (sessions, refusals, receiver, power)
@@ -113,7 +113,73 @@ crontab -e
 It keeps the newest 14 daily snapshots plus 8 older Sunday ones (arguments 3 and 4 change that),
 checks every pulled file with `PRAGMA quick_check`, and sets a damaged one aside as `*.bad`.
 
-## 6. Debugging decodes
+## 6. Claude Code (MCP)
+
+`mapper serve-mcp` lets Claude Code on the laptop read the map and ask for sessions. It is a
+second service, `dmr-mapper-mcp`, beside the daemon: it reads the database and posts commands, and
+never opens the receiver. It listens on the Pi's Tailscale address only, without a token: the
+tailnet is the trust boundary. Anything but a Tailscale (100.64.0.0/10) or loopback address is
+refused.
+
+On the **Pi**, in `config.local.yaml` (`tailscale ip -4` gives the address):
+
+```yaml
+mcp:
+  enabled: true
+  bind: 100.x.y.z                  # the Pi's Tailscale address
+  allowed_hosts: [pi5]             # optional: other names the laptop uses for the Pi (MagicDNS)
+```
+
+then `deploy/deploy.sh`. It installs the `mcp` extra, renders and enables `dmr-mapper-mcp.service`,
+and restarts it on every deploy (always safe: it holds no receiver). `mapper doctor` shows the URL.
+With `enabled: false` again, the next deploy stops and disables it.
+
+On the **laptop**, in the folder you run Claude Code from:
+
+```sh
+claude mcp add --transport http dmr-mapper http://<pi-tailscale-ip>:8765/mcp
+```
+
+or check a `.mcp.json` into that folder (never into this repository: the address is machine-specific):
+
+```json
+{ "mcpServers": { "dmr-mapper": { "type": "http", "url": "http://<pi-tailscale-ip>:8765/mcp" } } }
+```
+
+`/mcp` in Claude Code shows whether it is connected.
+
+What Claude may do:
+
+| | Tools | Needs |
+|---|---|---|
+| look | `get_status`, `list_carriers`, `get_fingerprint`, `list_survey_hits`, `query_systems`, `explain_link`, `get_session` | nothing |
+| propose | `propose_link`, `withdraw_proposal`, `correlate_now` | nothing; a proposal is evidence with source `mcp`, capped at `mcp.max_proposal_confidence` (0.8), never confirms a link by itself and never lifts the Tier II cap |
+| scan | `scan_band`, `decode_carriers`, `watch_slice` | your approval, each time |
+| stop | `stop_session` | nothing (it only hands the receiver back) |
+
+Approval (`mcp.approval`):
+
+- `ask` (default): Claude Code shows a yes/no dialog with what, where and how long. You answer it,
+  not the model. If the client cannot show one, the request waits for the console.
+- `console`: the request always waits on the Pi. The console's status bar shows
+  `Claude asks #N: watch 469.3500 MHz 20 min`; `y` approves, `v` refuses. From the shell:
+  `mapper requests`, `mapper approve [N]`, `mapper refuse [N]`.
+- `none`: no approval here; Claude Code's own permission prompt for the tool is the only gate.
+
+A request nobody answers expires after `mcp.approval_timeout_min` (10), and the daemon refuses an
+approved one that has waited much longer (it was down): the place and the question have moved on.
+Claude asks for at most `mcp.max_session_minutes` (30), `default_session_minutes` (10) when it gives
+no budget, and nothing while another session runs.
+
+Radio IDs reach Claude as pseudonyms (`radio-3f2a9c`, stable while the server runs, so "the same
+radio on both carriers" still shows); talkgroups are shown. `mcp.show_radio_ids: true` shows the IDs.
+
+```sh
+journalctl -u dmr-mapper-mcp -f                 # requests and errors
+curl -s -o /dev/null -w '%{http_code}\n' http://<pi-tailscale-ip>:8765/mcp   # a status (400) = listening; 421 = that name is not in allowed_hosts
+```
+
+## 7. Debugging decodes
 
 `decode.keep_raw_logs: true` in `config.local.yaml` (then `sudo systemctl restart dmr-mapper`)
 keeps DSD-FME's raw output per carrier and slice in `var/raw/` as
@@ -122,7 +188,7 @@ at `raw_log_max_mb × raw_log_keep` in total (250 MB by default), oldest deleted
 replay with `mapper ingest var/raw/`. Turn it off again afterwards; nothing else is ever kept raw,
 and IQ is never kept.
 
-## 7. Restoring from a snapshot
+## 8. Restoring from a snapshot
 
 ```sh
 sudo systemctl stop dmr-mapper
@@ -130,11 +196,11 @@ cp var/snapshots/mapper-YYYYmmdd.db var/mapper.db && rm -f var/mapper.db-wal var
 sudo systemctl start dmr-mapper
 ```
 
-## 8. Removing
+## 9. Removing
 
 ```sh
-sudo systemctl disable --now dmr-mapper dmr-mapper-snapshot.timer
-sudo rm /etc/systemd/system/dmr-mapper.service /etc/systemd/system/dmr-mapper-snapshot.{service,timer}
+sudo systemctl disable --now dmr-mapper dmr-mapper-snapshot.timer dmr-mapper-mcp
+sudo rm /etc/systemd/system/dmr-mapper.service /etc/systemd/system/dmr-mapper-snapshot.{service,timer} /etc/systemd/system/dmr-mapper-mcp.service
 sudo systemctl daemon-reload
 rm ~/.local/bin/mapper
 ```

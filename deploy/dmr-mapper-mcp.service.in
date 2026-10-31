@@ -1,0 +1,21 @@
+# Rendered by deploy/deploy.sh when mcp.enabled is true: @USER@, @GROUP@ and @REPO@ are filled in on the Pi.
+[Unit]
+Description=dmr-system-mapper MCP server for Claude Code (HTTP on the Tailscale address; never opens the receiver)
+Documentation=file://@REPO@/DEPLOY.md
+After=network-online.target tailscaled.service dmr-mapper.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=@USER@
+Group=@GROUP@
+WorkingDirectory=@REPO@
+ExecStart=@REPO@/.venv/bin/mapper serve-mcp
+Environment=PYTHONUNBUFFERED=1
+# the Tailscale address may not exist yet at boot: binding fails, systemd tries again
+Restart=always
+RestartSec=10
+Nice=10
+
+[Install]
+WantedBy=multi-user.target

@@ -17,6 +17,7 @@ DEFAULT_DECAY_DAYS = {"explicit": 30, "behavioral": 14, "identity": 30, "rf": 7,
 DEFAULT_LABELS = {"confirmed": 0.85, "probable": 0.60, "possible": 0.30}
 CONTRADICTION_PENALTY = 0.2
 CONTRADICTION_MIN_WEIGHT = 0.1
+PROPOSAL_SOURCE = "mcp"
 
 
 class ScoringConfig:
@@ -53,12 +54,17 @@ class ScoringConfig:
 
 def score_rows(rows: Iterable[Mapping[str, Any]], cfg: ScoringConfig, now: int) -> LinkScore:
     """``rows`` are evidence rows (type, weight?, raw_score, observed_at, first_observed_at,
-    support_count, source, details). Returns the combined link score."""
+    support_count, source, details). Returns the combined link score.
+
+    A proposal Claude made through MCP (``source = 'mcp'``) adds to the score like manual evidence
+    but is judgement, not the operator's word: it never makes a link ``confirmed`` by itself and
+    never lifts the Tier II cap."""
     scored: list[ScoredEvidence] = []
     positive = 1.0
     contradictions = 0
     has_strong = False
     only_tier2 = True
+    other_positive = proposed = False
     for r in rows:
         etype = str(r["type"])
         raw = float(r["raw_score"])
@@ -79,10 +85,16 @@ def score_rows(rows: Iterable[Mapping[str, Any]], cfg: ScoringConfig, now: int) 
         if raw <= 0:
             continue
         positive *= 1.0 - min(0.999, contribution)
+        if str(r.get("source", "auto")) == PROPOSAL_SOURCE:
+            proposed = True
+            continue
+        other_positive = True
         if etype in STRONG_TYPES:
             has_strong = True
         if etype not in TIER2_TYPES:
             only_tier2 = False
+    if proposed and not other_positive:
+        only_tier2 = False          # a proposal alone is not Tier II evidence; it still cannot be confirmed
     positive = 1.0 - positive
     penalty = CONTRADICTION_PENALTY ** contradictions
     score = positive * penalty
