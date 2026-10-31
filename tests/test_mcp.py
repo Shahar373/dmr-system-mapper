@@ -233,16 +233,17 @@ def test_console_approval_queue(db, mcp_cfg):
             st.decide(s, b, True, "cli", 600)
 
 
-def test_approval_none_posts_at_once(db, mcp_cfg):
+@pytest.mark.parametrize("mode", ["client", "none"])              # none: the first name of client
+def test_approval_by_the_clients_own_prompt_posts_at_once(db, mcp_cfg, mode):
     c = copy.deepcopy(mcp_cfg)
-    c["mcp"]["approval"] = "none"
+    c["mcp"]["approval"] = mode
     t = MapperTools(c, db)
     with FakeDaemon(db) as d:
         time.sleep(0.2)
         command, params, _ = t.prepare_session("survey", minutes=2)
         req = t.submit_session(command, params, approved_by=None)
     assert req["status"] == "done" and "session_id" in req
-    assert d.taken[0]["params"]["approved_by"].startswith("nobody")
+    assert "client's permission prompt" in d.taken[0]["params"]["approved_by"]
 
 
 def test_daemon_refuses_a_stale_mcp_request(tmp_path, cfg):
@@ -278,6 +279,9 @@ def _call(server, name: str, args: dict, mode: str = "auto", answer: str | None 
 
     async def elicit(context, params):
         asked.append(params.message)
+        if answer == "accept-default":       # the person only presses Accept: the box comes ticked
+            props = params.requested_schema["properties"]
+            return types.ElicitResult(action="accept", content={k: v["default"] for k, v in props.items()})
         return types.ElicitResult(action=answer, content={"approve": True} if answer == "accept" else None)
 
     async def go():
@@ -308,6 +312,13 @@ def test_server_asks_the_operator_in_claude_code(db, mcp_cfg, mode):
         out, asked = _call(server, "decode_carriers", {"freqs": [168.863], "minutes": 5}, mode, answer="accept")
         assert out["status"] == "done" and out["session_id"] and len(asked) == 1
         assert d.taken[-1]["params"]["approved_by"] == "operator in Claude Code"
+        out, asked = _call(server, "decode_carriers", {"freqs": [168.863], "minutes": 5}, mode, answer="accept-default")
+        assert out["status"] == "done" and asked
+        n = len(d.taken)
+        out, asked = _call(server, "decode_carriers", {"freqs": [168.863], "minutes": 5}, mode, answer="cancel")
+        assert out["status"] == "awaiting_approval" and asked and len(d.taken) == n    # closed unanswered: the console decides
+        with Store(db) as s:
+            st.decide(s, out["request_id"], False, "test", 600)
         n = len(d.taken)
         out, asked = _call(server, "scan_band", {"band": "uhf", "minutes": 3}, mode, answer=None)   # no dialog: the console decides
         assert out["status"] == "awaiting_approval" and not asked and len(d.taken) == n

@@ -706,20 +706,27 @@ Read tools carry `readOnlyHint`; the scan tools `openWorldHint`.
 `mcp.max_session_minutes`, default `default_session_minutes`, band plan): a refusal is the answer
 and nobody is asked. Then:
 
-- `ask` (default): an elicitation, a yes/no form in Claude Code that the person answers, not the
+- `ask` (default): an elicitation, a yes/no form in the client that the person answers, not the
   model. It is a resolver (`Resolve` → `Elicit`), so the SDK carries it as the negotiated protocol
   wants: a server-to-client request in the middle of the call up to 2025-11-25, an
-  `InputRequiredResult` round from 2026-07-28. Only an answer with `approve: true` approves: a
-  resolver that asks nothing (client without elicitation) still reaches the tool as an "accept"
-  without data, and is treated as "no dialog". Accept → the command is posted (`params.approved_by`);
-  decline or cancel → nothing is posted, and the model is told not to retry without asking. No
-  dialog → as `console`.
+  `InputRequiredResult` round from 2026-07-28. Only an answer with `approve: true` approves (the box
+  is ticked to begin with, so Accept means yes): a resolver that asks nothing (client without
+  elicitation) still reaches the tool as an "accept" without data, and is treated as "no dialog".
+  Accept → the command is posted (`params.approved_by`); decline → nothing is posted, and the model
+  is told not to retry without asking; cancel (closed unanswered) or no dialog → as `console`.
+  Claude Desktop (2026-10-31) declares elicitation but shows nothing and answers at once (decline
+  or cancel: the first version treated both as a refusal).
+- `client`: posted at once; the client's own permission prompt before each tool call is the
+  approval. For Claude Desktop, with `permissions.ask` on the three scan tools in the laptop
+  folder's `.claude/settings.json` (an `ask` rule wins over an earlier "always allow").
 - `console`: the command is inserted as `awaiting_approval`; the console shows
   `Claude asks #N: …` (`y` approve, `v` refuse), the shell has `mapper requests | approve | refuse`.
   Approval turns it `pending`, refusal `refused`; unanswered after `approval_timeout_min` it becomes
   `expired`. Approving while the daemon is down is refused, and the daemon itself refuses an `mcp`
   session command older than the timeout + 2 min.
-- `none`: posted at once; the client's own permission prompt is the only gate.
+
+No mode holds against a client session that runs shell commands on a laptop with an SSH key for the
+Pi; the gate's job is that a person sees every scan before it runs.
 
 `stop_session` needs no approval: it only gives the receiver back.
 
@@ -753,10 +760,12 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 
 ## 12. Open points and known limits
 
-- **MCP not yet used from the laptop.** The server is tested in-process with the SDK's client over
-  both protocol generations (including the approval dialog) and over HTTP on loopback. Whether the
-  installed Claude Code shows the elicitation dialog is checked on first use; if it does not, the
-  request waits in the console (`mcp.approval: console` makes that the rule).
+- **MCP from Claude Desktop, first use 2026-10-31.** Connected from the Code tab (Local session,
+  `.mcp.json`); all 14 tools listed; a survey of 469-470 MHz requested by Claude, approved, run and
+  read back. Desktop declared elicitation but answered the approval dialog at once without showing
+  it, so `mcp.approval: client` exists: Desktop's own tool prompt is the approval. Port 8765 was
+  taken by another program on that Pi (8766 used). The first `deploy.sh` after the pull ran its old
+  copy and skipped the `mcp` extra; it now re-executes itself when the pull changed it.
 
 - **No rf evidence fixture.** `samples/surveyor` has no candidate list with SNR. `rf_profile`
   is implemented against `observations` and tested synthetically; its weight is deliberately low.

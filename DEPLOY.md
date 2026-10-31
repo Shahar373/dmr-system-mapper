@@ -134,19 +134,22 @@ then `deploy/deploy.sh`. It installs the `mcp` extra, renders and enables `dmr-m
 and restarts it on every deploy (always safe: it holds no receiver). `mapper doctor` shows the URL.
 With `enabled: false` again, the next deploy stops and disables it.
 
-On the **laptop**, in the folder you run Claude Code from:
+On the **laptop**: the connection must start on the laptop, which is on the tailnet. Claude in the
+cloud (claude.ai, cloud sessions, and connectors added under Settings → Connectors, which Anthropic's
+servers call) cannot reach a Tailscale address.
 
-```sh
-claude mcp add --transport http dmr-mapper http://<pi-tailscale-ip>:8765/mcp
-```
+- **Claude Desktop**: the **Code** tab, an environment of type **Local** with a folder of its own
+  (e.g. `Documents\dmr`). In that folder put a `.mcp.json` (ask Claude in that session to create it),
+  then start a new session and allow `dmr-mapper` when asked. `/mcp` does not exist in the app: ask
+  Claude which MCP servers it has.
+- **Claude Code in a terminal**: `claude mcp add --transport http --scope user dmr-mapper http://<pi-tailscale-ip>:8765/mcp`
+  (from any folder), or the same `.mcp.json`; `/mcp` shows whether it is connected.
 
-or check a `.mcp.json` into that folder (never into this repository: the address is machine-specific):
+`.mcp.json` (never in this repository: the address is machine-specific):
 
 ```json
 { "mcpServers": { "dmr-mapper": { "type": "http", "url": "http://<pi-tailscale-ip>:8765/mcp" } } }
 ```
-
-`/mcp` in Claude Code shows whether it is connected.
 
 What Claude may do:
 
@@ -154,17 +157,38 @@ What Claude may do:
 |---|---|---|
 | look | `get_status`, `list_carriers`, `get_fingerprint`, `list_survey_hits`, `query_systems`, `explain_link`, `get_session` | nothing |
 | propose | `propose_link`, `withdraw_proposal`, `correlate_now` | nothing; a proposal is evidence with source `mcp`, capped at `mcp.max_proposal_confidence` (0.8), never confirms a link by itself and never lifts the Tier II cap |
-| scan | `scan_band`, `decode_carriers`, `watch_slice` | your approval, each time |
+| scan | `scan_band`, `decode_carriers`, `watch_slice` | a person's approval, each time |
 | stop | `stop_session` | nothing (it only hands the receiver back) |
 
-Approval (`mcp.approval`):
+Approval (`mcp.approval` on the Pi):
 
-- `ask` (default): Claude Code shows a yes/no dialog with what, where and how long. You answer it,
-  not the model. If the client cannot show one, the request waits for the console.
+- `client` (**Claude Desktop**): the app's own "allow this tool?" prompt before every call is the
+  approval; nothing more is asked on the Pi. Put this `.claude/settings.json` in the laptop folder
+  (next to `.mcp.json`) so reading never asks and scanning always asks, even if "always allow" was
+  once clicked for it (an `ask` rule wins over an `allow`):
+
+  ```json
+  {
+    "permissions": {
+      "allow": ["mcp__dmr-mapper__get_status", "mcp__dmr-mapper__list_carriers", "mcp__dmr-mapper__get_fingerprint",
+                "mcp__dmr-mapper__list_survey_hits", "mcp__dmr-mapper__query_systems", "mcp__dmr-mapper__explain_link",
+                "mcp__dmr-mapper__get_session"],
+      "ask": ["mcp__dmr-mapper__scan_band", "mcp__dmr-mapper__decode_carriers", "mcp__dmr-mapper__watch_slice"]
+    }
+  }
+  ```
+
+  Do not run that session in a mode that approves everything by itself.
+- `ask` (default; **Claude Code in a terminal**): this server shows its own dialog with what, where
+  and how long: Accept starts it, Decline refuses, closing it leaves the request to the console.
+  Claude Desktop (checked 2026-10-31) shows no such dialog and refuses it by itself: use `client`.
 - `console`: the request always waits on the Pi. The console's status bar shows
   `Claude asks #N: watch 469.3500 MHz 20 min`; `y` approves, `v` refuses. From the shell:
   `mapper requests`, `mapper approve [N]`, `mapper refuse [N]`.
-- `none`: no approval here; Claude Code's own permission prompt for the tool is the only gate.
+
+No gate holds against a session that can run commands on a laptop with an SSH key for the Pi
+(`ssh pi mapper approve` would pass `console` too). What protects the receiver is that a person
+sees every scan before it runs: keep the client asking before scan tools and before shell commands.
 
 A request nobody answers expires after `mcp.approval_timeout_min` (10), and the daemon refuses an
 approved one that has waited much longer (it was down): the place and the question have moved on.
@@ -176,8 +200,18 @@ radio on both carriers" still shows); talkgroups are shown. `mcp.show_radio_ids:
 
 ```sh
 journalctl -u dmr-mapper-mcp -f                 # requests and errors
-curl -s -o /dev/null -w '%{http_code}\n' http://<pi-tailscale-ip>:8765/mcp   # a status (400) = listening; 421 = that name is not in allowed_hosts
+curl -s -o /dev/null -w '%{http_code}\n' http://<pi-tailscale-ip>:8765/mcp   # a status (400) = listening; 421 = that name is not in allowed_hosts; 000 = not listening
 ```
+
+Troubleshooting:
+
+- **`address already in use`** in the journal (and the service restarting every 10 s): another
+  program on the Pi has the port (`sudo ss -ltnp | grep 8765` names it). Set `mcp.port: 8766` (any
+  free port) in `config.local.yaml`, `sudo systemctl restart dmr-mapper-mcp`, and change the port in
+  the laptop's `.mcp.json`. The laptop sees `ECONNRESET` meanwhile: it reaches the other program.
+- **`Couldn't reconnect dmr-mapper`** right after a restart of the service: start a new session.
+- **Every scan "declined" at once, no dialog seen**: the client refuses server dialogs; set
+  `mcp.approval: client` (or `console`) and restart the service.
 
 ## 7. Debugging decodes
 
