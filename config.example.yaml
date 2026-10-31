@@ -51,7 +51,8 @@ decode:
   dsd_fme_bin: dsd-fme         # name on PATH or absolute path
   extra_args: []               # appended to the DSD-FME command line (see CAPTURE.md §2)
   max_instances: 4             # on mains power; power.battery_max_instances applies on battery
-  seconds_per_carrier: 60      # decode dwell per carrier per cycle; same-site groups get double
+  seconds_per_carrier: 60      # decode dwell per carrier per cycle; same-site groups get double. Carriers asked for
+                               # by frequency with a budget are listened to for the whole budget instead
   invert_retry_s: 10           # restart with -xr when only -DMR syncs were seen for this long
   tcp_base_port: 7355          # PCM bridge ports: base, base+1, ... per instance
   keep_raw_logs: false         # debug only

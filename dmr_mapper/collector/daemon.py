@@ -479,6 +479,9 @@ class Daemon:
         dcfg = self.cfg.get("decode", {}) or {}
         max_instances = int(params.get("max_instances") or 1)
         only = [int(f) for f in (params.get("freqs") or [])]
+        # carriers asked for by name with a budget given (MCP, `mapper decode F --minutes N`): one pass
+        # that listens for the whole budget, shared out among the slices; without a budget, one dwell
+        spread = bool(only and params.get("budget_s"))
         summary["carriers"] = {}
         summary["slices"] = []
         rounds = 0
@@ -494,7 +497,10 @@ class Daemon:
             for i, sl in enumerate(slices):
                 self._check(t0, budget_s)
                 remaining = budget_s - (time.monotonic() - t0)
-                dwell = int(min(sl.dwell_s, max(10, remaining)))
+                if spread:
+                    dwell = int(max(10, remaining / (len(slices) - i)))
+                else:
+                    dwell = int(min(sl.dwell_s, max(10, remaining)))
                 self._set_progress(phase="decoding", round=rounds, slice=i + 1, slices=len(slices), center_hz=sl.center_hz,
                                    freqs=[t.freq_hz for t in sl.targets], reason=sl.reason, dwell_s=dwell,
                                    elapsed_s=int(time.monotonic() - t0), budget_s=budget_s)

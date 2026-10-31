@@ -145,7 +145,7 @@ mapper daemon                      # foreground; systemd runs this in Phase 3b
 mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
-mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: plan from the latest survey
+mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the latest survey
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions
 mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
