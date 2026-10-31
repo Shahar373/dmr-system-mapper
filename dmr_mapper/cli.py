@@ -208,13 +208,6 @@ def cmd_propose(args: argparse.Namespace) -> int:
     return 0
 
 
-def _not_yet(phase: str):
-    def run(args: argparse.Namespace) -> int:
-        print(f"this command arrives in Phase {phase}", file=sys.stderr)
-        return 1
-    return run
-
-
 # -- Phase 3: daemon, console, one-shot sessions -------------------------------------------------
 def _db_path(args: argparse.Namespace, cfg: dict) -> Path:
     return Path(args.db) if getattr(args, "db", None) else resolve_path(cfg, "db")
@@ -413,6 +406,72 @@ def cmd_control(args: argparse.Namespace) -> int:
         return 0 if c and c["status"] == "done" else 1
 
 
+def _approval_timeout_s(cfg: dict) -> int:
+    return int(float((cfg.get("mcp", {}) or {}).get("approval_timeout_min", 10)) * 60)
+
+
+def cmd_requests(args: argparse.Namespace) -> int:
+    from .collector import state as st
+
+    cfg = load_config(args.config)
+    with Store(_db_path(args, cfg)) as store:
+        waiting = st.awaiting_approval(store, _approval_timeout_s(cfg))
+    if not waiting:
+        print("no request is waiting for approval")
+    for c in waiting:
+        when = datetime.fromtimestamp(c["created"], tz=timezone.utc).astimezone().strftime("%H:%M:%S")
+        print(f"  #{c['id']}  {when}  from {c['source']}: {st.describe_request(c['kind'], c['params'])}")
+    return 0
+
+
+def cmd_decide(args: argparse.Namespace) -> int:
+    """approve / refuse a session Claude asked for (the newest waiting one when no id is given)."""
+    from .collector import state as st
+
+    cfg = load_config(args.config)
+    approve = args.command == "approve"
+    with Store(_db_path(args, cfg)) as store:
+        timeout = _approval_timeout_s(cfg)
+        waiting = st.awaiting_approval(store, timeout)
+        cid = args.id or (waiting[-1]["id"] if waiting else None)
+        if cid is None:
+            print("no request is waiting for approval", file=sys.stderr)
+            return 1
+        if approve and not st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10))).alive:
+            print("the daemon is not running: start it first (sudo systemctl start dmr-mapper)", file=sys.stderr)
+            return 1
+        try:
+            c = st.decide(store, int(cid), approve, "cli", timeout)
+        except (KeyError, ValueError) as exc:
+            print(f"error: {exc.args[0]}", file=sys.stderr)
+            return 1
+        params = json.loads(c["params"] or "{}")
+        print(f"#{cid} {'approved' if approve else 'refused'}: {st.describe_request(c['kind'], params)}")
+        if approve:
+            done = st.wait_for_command(store, int(cid), timeout_s=30)
+            print(f"  {done['status']}: {done['result']}" if done else "  posted; the daemon has not taken it yet")
+    return 0
+
+
+def cmd_serve_mcp(args: argparse.Namespace) -> int:
+    import logging
+
+    fmt = "%(levelname)s %(message)s" if os.environ.get("INVOCATION_ID") else "%(asctime)s %(levelname)s %(message)s"
+    logging.basicConfig(level=logging.INFO, format=fmt, stream=sys.stderr)
+    cfg = load_config(args.config)
+    try:
+        from .mcp.server import serve
+    except ImportError as exc:
+        print(f"error: the MCP SDK is missing ({exc}); pip install -e '.[mcp]'", file=sys.stderr)
+        return 1
+    try:
+        serve(cfg, _db_path(args, cfg), args.bind, args.port)
+    except (ValueError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def cmd_capture_iq(args: argparse.Namespace) -> int:
     from .collector.sdr import capture_iq, make_backend
 
@@ -515,8 +574,24 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         line(True, "database", f"{path} schema v{store.schema_version()} {size / 1e6:.1f} MB")
         status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
         line(None, "daemon", f"{'alive' if status.alive else 'not running'}" + (f", mode {status.mode}" if status.alive else ""))
+    mcfg = cfg.get("mcp", {}) or {}
+    if mcfg.get("enabled"):
+        try:
+            from importlib.metadata import version as _version
+
+            from .mcp.server import check_bind
+            check_bind(str(mcfg.get("bind")), bool(mcfg.get("allow_any_bind", False)))
+            loop = str(mcfg.get("bind")).startswith("127.") or mcfg.get("bind") == "localhost"
+            line(None if loop else True, "MCP server", f"http://{mcfg.get('bind')}:{mcfg.get('port', 8765)}/mcp, mcp {_version('mcp')},"
+                 f" approval {mcfg.get('approval', 'ask')}" + (": loopback, the laptop cannot reach it" if loop else ""))
+        except ImportError as exc:
+            line(False, "MCP server", f"the mcp SDK is missing ({exc}): pip install -e '.[mcp]' (deploy.sh does it)")
+        except ValueError as exc:
+            line(False, "MCP server", str(exc))
+    else:
+        line(None, "MCP server", "off (mcp.enabled: false)")
     if shutil.which("systemctl"):
-        for unit in ("dmr-mapper.service", "dmr-mapper-snapshot.timer"):
+        for unit in ("dmr-mapper.service", "dmr-mapper-snapshot.timer") + (("dmr-mapper-mcp.service",) if mcfg.get("enabled") else ()):
             r = subprocess.run(["systemctl", "is-active", unit], capture_output=True, text=True)
             state = r.stdout.strip() or "unknown"
             line(state == "active" or None, unit, state + ("" if state == "active" else " (install with deploy/deploy.sh)"))
@@ -645,9 +720,17 @@ def build_parser() -> argparse.ArgumentParser:
     dr = sub.add_parser("doctor", help="check this machine: python packages, SoapySDR, dsd-fme, receiver, power, database")
     dr.set_defaults(func=cmd_doctor)
 
-    sp = sub.add_parser("serve-mcp", help="(Phase 5)")
-    sp.add_argument("rest", nargs="*")
-    sp.set_defaults(func=_not_yet("5"))
+    sp = sub.add_parser("serve-mcp", help="the MCP server for Claude Code (HTTP on mcp.bind:mcp.port; systemd runs it)")
+    sp.add_argument("--bind", help="listen address (default mcp.bind: the Pi's Tailscale address)")
+    sp.add_argument("--port", type=int, help="default mcp.port (8765)")
+    sp.set_defaults(func=cmd_serve_mcp)
+
+    rq = sub.add_parser("requests", help="sessions Claude asked for that wait for your approval")
+    rq.set_defaults(func=cmd_requests)
+    for verb, help_ in (("approve", "start a session Claude asked for"), ("refuse", "refuse a session Claude asked for")):
+        dp = sub.add_parser(verb, help=help_ + " (the newest waiting request when no id is given)")
+        dp.add_argument("id", nargs="?", type=int, help="request id from `mapper requests`")
+        dp.set_defaults(func=cmd_decide)
     return p
 
 

@@ -16,7 +16,7 @@ dependencies = [
 dev = ["pytest>=8.0", "pytest-asyncio>=0.23", "numpy>=1.26", "scipy>=1.11", "textual>=0.80"]
 collector = ["numpy>=1.26", "scipy>=1.11"]   # SoapySDR python bindings come from the OS package
 tui = ["textual>=0.80"]
-mcp = ["mcp>=1.2"]
+mcp = ["mcp>=2.0,<3"]           # MCPServer API (Phase 5)
 
 [project.scripts]
 mapper = "dmr_mapper.cli:main"

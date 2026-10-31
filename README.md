@@ -61,13 +61,13 @@ investigation only.
 | 3b | Deployment: `dmr-mapper` systemd service, `deploy/deploy.sh` (pull, install, restart), nightly snapshot + export timer, read-only archive pull, size-capped raw debug logs, `mapper snapshot` / `export --all` | done (first install on the Pi pending) |
 | 3c | GPS track and position of every survey hit (gpsd, or the device when nobody else has it open), one-button survey+decode (`a`), radios' LRRP positions no longer kept, radio IDs and talkgroups kept 90 days (`mapper prune`) | done |
 | 4 | Capacity Max in depth: `mapper watch` (a whole slice, DSD-FME on the control channel and on every traffic channel when it keys up, with pre-roll), Cap Max channel updates and neighbour LCNs from DSD-FME's raw bytes, LCN learning, Activity Updates from `SLCO Completed Block`, one Tier III numbering whatever DSD-FME prints, `mapper name` for systems and sites | done, checked on air 2026-10-31 (the 469 MHz network: two sites and their LCNs, an unheard third site; DESIGN.md §12) |
-| 5 | MCP server (HTTP over Tailscale) and `.mcp.json` snippet; Claude may look and propose, scans only with your approval | planned |
+| 5 | `mapper serve-mcp`: MCP server (streamable HTTP on the Tailscale address, `dmr-mapper-mcp` service), 14 tools; Claude may look and propose, scans only with your approval (a dialog in Claude Code, or `y` in the console / `mapper approve`); proposals never confirm a link by themselves; radio IDs as pseudonyms | done (first use from the laptop pending) |
 
 Each phase ends with a commit to `main` and waits for approval.
 
 ## Requirements
 
-- Python 3.11+, SQLite (stdlib), `pyyaml`, `networkx`; `mcp` for Phase 5.
+- Python 3.11+, SQLite (stdlib), `pyyaml`, `networkx`; `mcp` 2.x for the MCP server (`pip install -e '.[mcp]'`).
 - Collector and console: `numpy`, `scipy`, `textual` (`pip install -e '.[collector,tui]'`).
 - On the Pi: `dsd-fme` (build `AW 2026-26` or newer), SoapySDR with SoapySDRPlay3 and its Python
   bindings. `mapper doctor` checks all of these.
@@ -142,7 +142,7 @@ processes it can afford (fewer on battery).
 ```sh
 mapper doctor                      # what is installed, is the receiver there, power, database
 mapper daemon                      # foreground; systemd runs this in Phase 3b
-mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · q quit
+mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
 mapper decode 168863000 168875000 --minutes 5   # specific carriers, or none: plan from the latest survey
@@ -205,6 +205,34 @@ mapper name site 469650000 Hilltop
 mapper name site 469650000 --clear
 mapper names
 ```
+
+## Usage (Phase 5)
+
+Claude Code on the laptop talks to the Pi through `mapper serve-mcp` (a service beside the daemon,
+set up in [DEPLOY.md §6](DEPLOY.md#6-claude-code-mcp)): `mcp.enabled: true` and the Pi's Tailscale
+address in `config.local.yaml`, `deploy/deploy.sh`, then on the laptop:
+
+```sh
+claude mcp add --transport http dmr-mapper http://<pi-tailscale-ip>:8765/mcp
+```
+
+Claude reads (`get_status`, `list_carriers`, `get_fingerprint`, `list_survey_hits`,
+`query_systems`, `explain_link`, `get_session`), proposes (`propose_link`, `withdraw_proposal`,
+`correlate_now`), stops a session (`stop_session`), and asks for scans (`scan_band`,
+`decode_carriers`, `watch_slice`). A scan starts only when you approve it: a yes/no dialog in
+Claude Code, or, when the client cannot show one (or `mcp.approval: console`), on the Pi:
+
+```sh
+mapper requests          # what Claude asked for
+mapper approve           # the newest request (or: mapper approve 12)
+mapper refuse 12
+mapper tui               # the status bar shows "Claude asks #12: ..."; y approves, v refuses
+```
+
+A proposal is evidence with source `mcp`: it raises a link's score (at most
+`mcp.max_proposal_confidence`, 0.8) but never makes it `confirmed` and never lifts the Tier II cap;
+`mapper explain` shows it with its note, and `mapper propose` (yours) still counts in full. Radio
+IDs reach Claude as pseudonyms unless `mcp.show_radio_ids: true`.
 
 ## Samples (`samples/`)
 

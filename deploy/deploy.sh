@@ -1,18 +1,20 @@
 #!/usr/bin/env bash
 # Install or update dmr-system-mapper on the Pi. Run it from the clone, as the user that owns it:
 #
-#   deploy/deploy.sh             pull, install, (re)start the service, enable the nightly timer
+#   deploy/deploy.sh             pull, install, (re)start the service, enable the nightly timer,
+#                                and the MCP server for Claude Code when mcp.enabled is true
 #   deploy/deploy.sh --force     also restart while a session is running (the session is stopped)
 #   deploy/deploy.sh --no-pull   install what is checked out now
 #   deploy/deploy.sh --dry-run   print what would be done; nothing is changed
 #
 # It asks for sudo only to install the systemd unit files and to start/stop the service.
 # Nothing machine-specific is stored in the repository: user, group and paths are taken from
-# this machine, the snapshot time from the config (archive.snapshot_time).
+# this machine, the snapshot time and the MCP switch from the config (archive.snapshot_time, mcp.*).
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 SERVICE=dmr-mapper
+MCP_SERVICE=dmr-mapper-mcp
 DRY=0 FORCE=0 PULL=1 RENDER_DIR=""
 while [ $# -gt 0 ]; do
   case "$1" in
@@ -20,7 +22,7 @@ while [ $# -gt 0 ]; do
     --force) FORCE=1 ;;
     --no-pull) PULL=0 ;;
     --render-dir) RENDER_DIR="$2"; shift ;;
-    -h|--help) sed -n '2,13p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,14p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
   esac
   shift
@@ -73,23 +75,34 @@ case ":$PATH:" in
 esac
 
 # 4. render the systemd units --------------------------------------------------------------------
-SNAP_TIME="$("$PY" - "$REPO" <<'PYEOF'
+read -r SNAP_TIME MCP_ON MCP_URL <<<"$("$PY" - "$REPO" <<'PYEOF'
 import sys
 sys.path.insert(0, sys.argv[1])
 from dmr_mapper.config import load_config
-t = str((load_config().get("archive") or {}).get("snapshot_time", "03:30"))
+cfg = load_config()
+t = str((cfg.get("archive") or {}).get("snapshot_time", "03:30"))
 h, m = (int(x) for x in t.split(":"))
-print(f"{h:02d}:{m:02d}")
+mcp = cfg.get("mcp") or {}
+print(f"{h:02d}:{m:02d}", "yes" if mcp.get("enabled") else "no", f"http://{mcp.get('bind', '127.0.0.1')}:{mcp.get('port', 8765)}/mcp")
 PYEOF
 )"
+if [ "$MCP_ON" = yes ]; then
+  say "installing the MCP server's dependencies (mcp.enabled: true)"
+  run "$REPO/.venv/bin/pip" install --quiet --disable-pip-version-check -e "$REPO[collector,tui,mcp]"
+  case "$MCP_URL" in
+    *//127.*|*//localhost*) warn "mcp.bind is a loopback address: the laptop cannot reach $MCP_URL; set the Pi's Tailscale address in config.local.yaml" ;;
+  esac
+fi
+UNITS="dmr-mapper.service dmr-mapper-snapshot.service dmr-mapper-snapshot.timer"
+[ "$MCP_ON" = yes ] && UNITS="$UNITS $MCP_SERVICE.service"
 OUT="${RENDER_DIR:-$(mktemp -d)}"
 mkdir -p "$OUT"
-for f in dmr-mapper.service dmr-mapper-snapshot.service dmr-mapper-snapshot.timer; do
+for f in $UNITS; do
   sed -e "s|@USER@|$USER_NAME|g" -e "s|@GROUP@|$GROUP_NAME|g" -e "s|@REPO@|$REPO|g" -e "s|@TIME@|$SNAP_TIME|g" \
     "$REPO/deploy/$f.in" > "$OUT/$f"
   if grep -q '@[A-Z]*@' "$OUT/$f"; then echo "unfilled placeholder in $f" >&2; exit 1; fi
 done
-echo "    units rendered in $OUT (snapshot at $SNAP_TIME)"
+echo "    units rendered in $OUT (snapshot at $SNAP_TIME, MCP server: $MCP_ON)"
 
 # 5. is a daemon running that systemd does not own (started by hand)? -----------------------------
 STATE="$("$PY" - "$REPO" <<'PYEOF' || true
@@ -116,7 +129,7 @@ fi
 
 # 6. install units and (re)start ------------------------------------------------------------------
 changed=0
-for f in dmr-mapper.service dmr-mapper-snapshot.service dmr-mapper-snapshot.timer; do
+for f in $UNITS; do
   if ! cmp -s "$OUT/$f" "/etc/systemd/system/$f"; then
     say "installing /etc/systemd/system/$f"
     run sudo install -m 0644 "$OUT/$f" "/etc/systemd/system/$f"
@@ -140,6 +153,16 @@ fi
 say "enabling the nightly snapshot timer"
 run sudo systemctl enable --now dmr-mapper-snapshot.timer
 
+# the MCP server never holds the receiver: restarting it is always safe
+if [ "$MCP_ON" = yes ]; then
+  say "(re)starting $MCP_SERVICE on $MCP_URL"
+  run sudo systemctl enable "$MCP_SERVICE"
+  run sudo systemctl restart "$MCP_SERVICE"
+elif systemctl is-enabled --quiet "$MCP_SERVICE" 2>/dev/null || systemctl is-active --quiet "$MCP_SERVICE" 2>/dev/null; then
+  say "mcp.enabled is false: stopping and disabling $MCP_SERVICE"
+  run sudo systemctl disable --now "$MCP_SERVICE"
+fi
+
 # 7. summary --------------------------------------------------------------------------------------
 if [ "$DRY" != 1 ]; then
   sleep 2
@@ -153,5 +176,6 @@ done. The console:   mapper tui
      daemon log:     journalctl -u $SERVICE -f
      next snapshot:  systemctl list-timers dmr-mapper-snapshot.timer
 MSG
+[ "$MCP_ON" = yes ] && echo "     MCP server:     $MCP_URL   (journalctl -u $MCP_SERVICE -f)"
 [ -z "$RENDER_DIR" ] && [ "$DRY" != 1 ] && rm -rf "$OUT"
 exit 0

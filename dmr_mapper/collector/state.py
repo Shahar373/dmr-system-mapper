@@ -3,6 +3,12 @@
 The daemon owns ``daemon_state`` and ``sessions``; every client (TUI, MCP, CLI) talks to it only
 by inserting a row into ``commands`` and reading the tables back. This keeps one control channel
 over the tuner whatever the front end.
+
+A session Claude asks for through MCP (Phase 5) can wait for the operator's approval: it is inserted
+with status ``awaiting_approval``, which the daemon never takes, and becomes ``pending`` only when
+the operator approves it in the console or with ``mapper approve``. A request nobody answers
+expires after ``mcp.approval_timeout_min``: a scan asked for at one place must not start an hour
+later somewhere else.
 """
 
 from __future__ import annotations
@@ -103,13 +109,69 @@ def update_session_summary(store: Store, session_id: int, summary: dict[str, Any
 
 
 # -- client side ------------------------------------------------------------------------------
-def post_command(store: Store, source: str, kind: str, params: dict[str, Any] | None = None) -> int:
+def post_command(store: Store, source: str, kind: str, params: dict[str, Any] | None = None, awaiting_approval: bool = False) -> int:
     if kind not in COMMAND_KINDS:
         raise ValueError(f"unknown command {kind!r}; expected one of {COMMAND_KINDS}")
-    cur = store.conn.execute("INSERT INTO commands (created, source, kind, params) VALUES (?, ?, ?, ?)",
-                             (_now(), source, kind, canonical_json(params or {})))
+    cur = store.conn.execute("INSERT INTO commands (created, source, kind, params, status) VALUES (?, ?, ?, ?, ?)",
+                             (_now(), source, kind, canonical_json(params or {}), "awaiting_approval" if awaiting_approval else "pending"))
     store.commit()
     return int(cur.lastrowid)
+
+
+def expire_requests(store: Store, timeout_s: int) -> int:
+    """Requests waiting for approval longer than ``timeout_s`` will never start."""
+    cur = store.conn.execute("UPDATE commands SET status = 'expired', done_at = ?, result = 'nobody approved it in time'"
+                             " WHERE status = 'awaiting_approval' AND created < ?", (_now(), _now() - int(timeout_s)))
+    store.commit()
+    return cur.rowcount
+
+
+def awaiting_approval(store: Store, timeout_s: int) -> list[dict[str, Any]]:
+    expire_requests(store, timeout_s)
+    out = []
+    for r in store.rows("SELECT * FROM commands WHERE status = 'awaiting_approval' ORDER BY id"):
+        d = dict(r)
+        d["params"] = json.loads(d["params"] or "{}")
+        out.append(d)
+    return out
+
+
+def decide(store: Store, command_id: int, approve: bool, by: str, timeout_s: int) -> dict[str, Any]:
+    """Approve (the daemon takes it at its next tick) or refuse a request that awaits approval."""
+    expire_requests(store, timeout_s)
+    c = command(store, command_id)
+    if c is None:
+        raise KeyError(f"no request #{command_id}")
+    if c["status"] != "awaiting_approval":
+        raise ValueError(f"request #{command_id} is {c['status']}, not waiting for approval")
+    if approve:
+        store.conn.execute("UPDATE commands SET status = 'pending', result = ? WHERE id = ? AND status = 'awaiting_approval'",
+                           (f"approved by {by}", command_id))
+    else:
+        store.conn.execute("UPDATE commands SET status = 'refused', done_at = ?, result = ? WHERE id = ? AND status = 'awaiting_approval'",
+                           (_now(), f"refused by {by}", command_id))
+    store.commit()
+    return command(store, command_id) or {}
+
+
+def describe_request(kind: str, params: dict[str, Any]) -> str:
+    """One line for the operator: what the session would do, where and for how long."""
+    what = kind.removeprefix("start_")
+    bits: list[str] = []
+    if params.get("bands"):
+        bits.append("bands " + ", ".join(map(str, params["bands"])))
+    if params.get("range"):
+        r = params["range"]
+        bits.append(f"{r['start_hz'] / 1e6:.4f}-{r['stop_hz'] / 1e6:.4f} MHz")
+    if params.get("freqs"):
+        bits.append(", ".join(f"{int(f) / 1e6:.4f}" for f in params["freqs"]) + " MHz")
+    if params.get("center_hz"):
+        bits.append(f"centre {int(params['center_hz']) / 1e6:.4f} MHz")
+    if params.get("then_decode"):
+        what = "survey, then decode,"
+    if params.get("budget_s"):
+        bits.append(f"{int(params['budget_s']) // 60} min")
+    return f"{what} " + (" ".join(bits) if bits else "(defaults)")
 
 
 def read_status(store: Store, stale_s: int = 10) -> DaemonStatus:

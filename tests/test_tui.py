@@ -96,3 +96,22 @@ async def test_console_watch_status_and_naming(populated, cfg):
     with Store(populated) as s:
         assert [c["kind"] for c in st.recent_commands(s)][:1] == ["start_watch"]
         assert s.scalar("SELECT name FROM systems WHERE id = ?", (sys_id,)) == "Base [/x] [red]"
+
+
+@pytest.mark.asyncio
+async def test_console_approves_and_refuses_claudes_requests(populated, cfg):
+    with Store(populated) as s:
+        a = st.post_command(s, "mcp", "start_watch", {"freqs": [469_350_000], "budget_s": 600}, awaiting_approval=True)
+        b = st.post_command(s, "mcp", "start_survey", {"bands": ["uhf"], "budget_s": 300}, awaiting_approval=True)
+    app = MapperApp(populated, cfg)
+    async with app.run_test(size=(160, 44)) as pilot:
+        await pilot.pause()
+        text = app.query_one("#status", StatusBar).text
+        assert f"Claude asks #{b}" in text and "survey bands uhf 5 min" in text and "+1 more" in text, text
+        await pilot.press("v")                      # the newest first
+        await pilot.press("y")
+        await pilot.pause()
+        assert "Claude asks" not in app.query_one("#status", StatusBar).text
+    with Store(populated) as s:
+        assert st.command(s, b)["status"] == "refused" and st.command(s, b)["result"] == "refused by tui"
+        assert st.command(s, a)["status"] == "pending" and st.command(s, a)["result"] == "approved by tui"

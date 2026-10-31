@@ -26,6 +26,7 @@ from typing import Any
 
 import numpy as np
 
+from ..config import band_for_range
 from ..db import Store
 from . import state as st
 from .bridge import PcmServer
@@ -232,6 +233,10 @@ class Daemon:
         assert self._store is not None
         kind, params = cmd["kind"], cmd.get("params") or {}
         if kind in ("start_survey", "start_decode", "start_watch"):
+            mcp_timeout = int(float((self.cfg.get("mcp", {}) or {}).get("approval_timeout_min", 10)) * 60) + 120
+            if cmd.get("source") == "mcp" and time.time() - int(cmd.get("created") or 0) > mcp_timeout:
+                # asked for by Claude long ago (the daemon was down): the place and the question have moved on
+                return False, "request too old; ask again"
             if self.session_thread is not None and self.session_thread.is_alive() and self._closing.is_set():
                 # the previous session is only writing its summary (the one-button flow queues the
                 # decode from there): wait for it instead of refusing
@@ -438,6 +443,8 @@ class Daemon:
         wanted = params.get("bands")
         if wanted:
             bands = [b for b in bands if b.get("name") in wanted]
+        if params.get("range"):
+            bands = [band_for_range(bands, int(params["range"]["start_hz"]), int(params["range"]["stop_hz"]))]
         if not bands:
             raise ValueError("no survey bands configured (survey.bands)")
         summary["bands"] = {}

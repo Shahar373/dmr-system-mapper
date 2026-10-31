@@ -4,7 +4,8 @@ Layout: a status bar (daemon, receiver, power, session progress), a column of ac
 for carriers, survey hits, systems, sessions and a log of commands. Everything is read from the
 database every two seconds; actions insert rows into ``commands`` for the daemon. Naming a system
 or site (``n`` on the Systems tab) is the one thing the console writes itself: it touches only
-``names`` and the ``name`` column, never the receiver.
+``names`` and the ``name`` column, never the receiver. A session Claude asked for through MCP shows
+in the status bar until it is approved (``y``) or refused (``v``).
 """
 
 from __future__ import annotations
@@ -53,9 +54,14 @@ class StatusBar(Static):
         self.text = str(content)
         super().update(content)
 
-    def update_status(self, s: st.DaemonStatus) -> None:
+    def update_status(self, s: st.DaemonStatus, waiting: list[dict[str, Any]] | None = None) -> None:
+        ask = ""
+        if waiting:
+            c = waiting[-1]
+            more = f" (+{len(waiting) - 1} more)" if len(waiting) > 1 else ""
+            ask = f"\n[b yellow]Claude asks #{c['id']}:[/] {escape(st.describe_request(c['kind'], c['params']))}{more}   [b]y[/] approve  [b]v[/] refuse"
         if not s.alive:
-            self.update(f"[b red]daemon offline[/]  {s.message or ''}   (start it with: mapper daemon)")
+            self.update(f"[b red]daemon offline[/]  {s.message or ''}   (start it with: mapper daemon)" + ask)
             return
         sdr = s.sdr or {}
         power = s.power or {}
@@ -90,13 +96,13 @@ class StatusBar(Static):
         if s.mode in ("survey", "decode", "watch"):
             g = pr.get("gps")
             line2 += f"\nGPS {g['lat']:.5f}, {g['lon']:.5f} ({g['fix']})" if g else f"\nGPS: no fix ({pr.get('gps_source', '?')})"
-        self.update(line1 + "\n" + line2)
+        self.update(line1 + "\n" + line2 + ask)
 
 
 class MapperApp(App[None]):
     TITLE = "dmr-system-mapper"
     CSS = """
-    #status { height: auto; min-height: 3; max-height: 6; padding: 0 1; background: $panel; }
+    #status { height: auto; min-height: 3; max-height: 7; padding: 0 1; background: $panel; }
     #actions { width: 28; padding: 1; }
     #actions Button { width: 100%; margin-bottom: 1; }
     #budget { margin-bottom: 1; }
@@ -107,7 +113,7 @@ class MapperApp(App[None]):
         Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"),
         Binding("w", "watch", "Watch"), Binding("x", "stop", "Stop"),
         Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("n", "name", "Name"), Binding("r", "refresh", "Refresh"),
-        Binding("q", "quit", "Quit"),
+        Binding("y", "approve", "Approve Claude"), Binding("v", "refuse", "Refuse Claude"), Binding("q", "quit", "Quit"),
     ]
 
     def __init__(self, db_path: str | Path, cfg: dict[str, Any], source: str = "tui"):
@@ -122,6 +128,7 @@ class MapperApp(App[None]):
         # every correlator run, the frequency does not, so naming goes by the frequency when there is one
         self._selected: tuple[str, int, int | None] | None = None
         self._stale_s = int((cfg.get("daemon", {}) or {}).get("heartbeat_stale_s", 10))
+        self._approval_timeout_s = int(float((cfg.get("mcp", {}) or {}).get("approval_timeout_min", 10)) * 60)
 
     # -- layout -----------------------------------------------------------------------------------
     def compose(self) -> ComposeResult:
@@ -176,7 +183,7 @@ class MapperApp(App[None]):
         assert self.store is not None
         try:
             status = st.read_status(self.store, self._stale_s)
-            self.query_one("#status", StatusBar).update_status(status)
+            self.query_one("#status", StatusBar).update_status(status, st.awaiting_approval(self.store, self._approval_timeout_s))
             self._refresh_carriers()
             self._refresh_hits()
             self._refresh_systems()
@@ -263,10 +270,10 @@ class MapperApp(App[None]):
         assert self.store is not None
         log = self.query_one("#log", RichLog)
         for c in reversed(st.recent_commands(self.store, 30)):
-            if c["id"] in self._seen_commands or c["status"] in ("pending", "taken"):
+            if c["id"] in self._seen_commands or c["status"] in ("pending", "taken", "awaiting_approval"):
                 continue
             self._seen_commands.add(c["id"])
-            colour = "green" if c["status"] == "done" else "red"
+            colour = {"done": "green", "refused": "yellow", "expired": "yellow"}.get(c["status"], "red")
             when = datetime.fromtimestamp(c["done_at"] or c["created"], tz=timezone.utc).strftime("%H:%M:%S")
             log.write(f"{when} [{colour}]{c['kind']}[/] ({c['source']}): {c['result'] or ''}")
 
@@ -356,6 +363,32 @@ class MapperApp(App[None]):
 
     def action_stop(self) -> None:
         self._post("stop")
+
+    def _decide(self, approve: bool) -> None:
+        assert self.store is not None
+        log = self.query_one("#log", RichLog)
+        waiting = st.awaiting_approval(self.store, self._approval_timeout_s)
+        if not waiting:
+            log.write("[dim]no request from Claude is waiting[/]")
+            return
+        c = waiting[-1]
+        if approve and not st.read_status(self.store, self._stale_s).alive:
+            log.write("[red]the daemon is offline: start it before approving (the request keeps waiting)[/]")
+            return
+        try:
+            st.decide(self.store, int(c["id"]), approve, self.source, self._approval_timeout_s)
+        except (KeyError, ValueError) as exc:
+            log.write(f"[red]{escape(str(exc.args[0]))}[/]")
+            return
+        what = escape(st.describe_request(c["kind"], c["params"]))
+        log.write(f"[{'green' if approve else 'yellow'}]{'approved' if approve else 'refused'}[/] Claude's request #{c['id']}: {what}")
+        self.refresh_all()
+
+    def action_approve(self) -> None:
+        self._decide(True)
+
+    def action_refuse(self) -> None:
+        self._decide(False)
 
     def action_correlate(self) -> None:
         self._post("correlate")

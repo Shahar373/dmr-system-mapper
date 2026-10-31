@@ -71,3 +71,15 @@ def resolve_path(cfg: dict[str, Any], key: str) -> Path:
     """Resolve ``paths.<key>`` relative to the repository root unless absolute."""
     raw = Path(cfg.get("paths", {}).get(key, f"var/{key}"))
     return raw if raw.is_absolute() else repo_root() / raw
+
+
+def band_for_range(bands: list[dict[str, Any]], start_hz: int, stop_hz: int) -> dict[str, Any]:
+    """A survey band for part of a configured band (raster and settings of that band). A range
+    outside every configured band is refused: the band plan in the config is what may be scanned."""
+    if stop_hz <= start_hz:
+        raise ValueError("stop_hz must be above start_hz")
+    for b in bands:
+        if int(b.get("start_hz", 0)) <= start_hz and stop_hz <= int(b.get("stop_hz", 0)):
+            return {**b, "name": f"{b.get('name')}:{start_hz / 1e6:.4f}-{stop_hz / 1e6:.4f}", "start_hz": int(start_hz), "stop_hz": int(stop_hz)}
+    names = ", ".join(f"{b.get('name')} {int(b.get('start_hz', 0)) / 1e6:.3f}-{int(b.get('stop_hz', 0)) / 1e6:.3f} MHz" for b in bands)
+    raise ValueError(f"{start_hz / 1e6:.4f}-{stop_hz / 1e6:.4f} MHz is not inside one configured survey band ({names or 'none configured'})")
