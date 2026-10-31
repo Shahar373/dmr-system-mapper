@@ -4,7 +4,8 @@ of this is testable offline.
 
 Rules (DESIGN.md §10):
 - Reading never touches the receiver. The MCP server never opens it either: a scan is a command
-  for the daemon, and only after the operator approved it (``request_session``).
+  for the daemon, and only after a person approved it (``mcp.approval``: a dialog from this
+  server, the client's own permission prompt, or the console on the Pi).
 - Claude writes only proposals (``evidence.source = 'mcp'``, which scoring never lets confirm a
   link or lift the Tier II cap by itself) and correlator runs.
 - Radio IDs are personal: unless ``mcp.show_radio_ids`` is true they are replaced by pseudonyms
@@ -47,9 +48,9 @@ class MapperTools:
         self.cfg = cfg
         self.db_path = Path(db_path) if db_path else resolve_path(cfg, "db")
         m = cfg.get("mcp", {}) or {}
-        self.approval = str(m.get("approval", "ask"))
-        if self.approval not in ("ask", "console", "none"):
-            raise ValueError(f"mcp.approval must be ask, console or none, not {self.approval!r}")
+        self.approval = {"none": "client"}.get(str(m.get("approval", "ask")), str(m.get("approval", "ask")))
+        if self.approval not in ("ask", "client", "console"):
+            raise ValueError(f"mcp.approval must be ask, client or console, not {self.approval!r}")
         self.approval_timeout_s = int(float(m.get("approval_timeout_min", 10)) * 60)
         self.max_minutes = float(m.get("max_session_minutes", 30))
         self.default_minutes = float(m.get("default_session_minutes", 10))
@@ -439,10 +440,11 @@ class MapperTools:
         return command, params, st.describe_request(command, params)
 
     def submit_session(self, command: str, params: dict[str, Any], approved_by: str | None) -> dict[str, Any]:
-        """Post the command: at once when approved (or approval is off), else waiting for the console."""
+        """Post the command: at once when approved (in a dialog, or by the client's permission prompt
+        with ``mcp.approval: client``), else waiting for the console."""
         with self.store() as s:
-            if approved_by or self.approval == "none":
-                params = {**params, "approved_by": approved_by or "nobody (mcp.approval: none)"}
+            if approved_by or self.approval == "client":
+                params = {**params, "approved_by": approved_by or "operator, in the client's permission prompt (mcp.approval: client)"}
                 cid = st.post_command(s, "mcp", command, params)
                 c = st.wait_for_command(s, cid, timeout_s=30)
                 result = self._request(s, cid, c)
@@ -454,7 +456,9 @@ class MapperTools:
         return result
 
     def refuse_note(self, what: str) -> dict[str, Any]:
-        return {"status": "declined", "what": what, "note": "the operator declined; nothing was started. Ask before trying again."}
+        return {"status": "declined", "what": what,
+                "note": "the operator declined; nothing was started. Ask the person before trying again. If they saw no dialog, their"
+                        " client refuses dialogs by itself: mcp.approval on the Pi should then be client (Claude Desktop) or console."}
 
     def _request(self, s: Store, cid: int, c: dict[str, Any] | None) -> dict[str, Any]:
         c = c or st.command(s, cid) or {}

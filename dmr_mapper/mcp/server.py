@@ -4,16 +4,19 @@ Streamable HTTP, bound to the Pi's Tailscale address (or loopback) only, no toke
 the trust boundary. The server is its own process beside the daemon; it reads the database and
 posts commands, and never opens the receiver.
 
-A scan (survey, decode, watch) needs the operator's approval, asked in one of two ways
-(``mcp.approval``): ``ask`` shows a yes/no dialog in Claude Code itself (MCP elicitation: the person
-answers, not the model) and falls back to the console when the client cannot show one;
-``console`` always waits for ``y`` in ``mapper tui`` or ``mapper approve``. ``none`` leaves the gate
-to Claude Code's own per-tool permission prompt.
+A scan (survey, decode, watch) needs a person's approval (``mcp.approval``): ``ask`` shows a
+dialog from this server in the client (MCP elicitation: the person answers, not the model) and
+falls back to the console when none is shown; ``client`` relies on the client's own permission
+prompt before each tool call (Claude Desktop shows no elicitation dialog, but asks before every
+scan tool when its settings say ``ask`` for them); ``console`` always waits for ``y`` in
+``mapper tui`` or ``mapper approve``.
 
 The dialog is a resolver (``Resolve``/``Elicit``), so the SDK sends it the way the negotiated
 protocol wants (a request in the middle of the call up to 2025-11-25, an ``InputRequiredResult``
 round from 2026-07-28). A resolver that asks nothing still reaches the tool as an "accept" without
-data, so only an answer that carries ``approve: true`` counts as approval.
+data, so only an answer that carries ``approve: true`` counts as approval. Accept means yes (the box
+is ticked to begin with), decline means no, and a dialog closed without an answer leaves the
+decision to the console.
 """
 
 # No ``from __future__ import annotations`` here: the SDK reads the tool signatures, and the
@@ -63,7 +66,7 @@ Freq = Annotated[float, Field(description="Hz (469350000) or MHz (469.35)")]
 
 
 class Approval(BaseModel):
-    approve: bool = Field(default=False, description="Start this session on the Pi's receiver now")
+    approve: bool = Field(default=True, description="Start this session on the Pi's receiver now (untick to refuse)")
 
 
 def check_bind(host: str, allow_any: bool = False) -> None:
@@ -95,7 +98,7 @@ def _decision(result: Any) -> str | None:
         if isinstance(result.data, Approval):
             return "approved" if result.data.approve else "declined"
         return None
-    return "declined" if getattr(result, "action", None) in ("decline", "cancel") else None
+    return "declined" if getattr(result, "action", None) == "decline" else None     # cancel: closed unanswered
 
 
 def build_server(cfg: dict[str, Any], db_path: str | Path | None = None) -> tuple[MCPServer, MapperTools]:

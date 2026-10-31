@@ -143,10 +143,11 @@ mcp:                           # mapper serve-mcp: Claude Code on the laptop ove
                                # anything but loopback or a Tailscale address is refused (unless allow_any_bind: true)
   port: 8765
   allowed_hosts: []            # other names the laptop may use for the Pi in the URL, e.g. its MagicDNS name
-  approval: ask                # scans (survey, decode, watch) need your approval:
-                               #   ask: a yes/no dialog in Claude Code; if the client cannot show one, as console
+  approval: ask                # scans (survey, decode, watch) need a person's approval:
+                               #   ask: a yes/no dialog from this server (Claude Code in a terminal); none shown: as console
+                               #   client: the client's own "allow this tool?" prompt is the approval (Claude Desktop,
+                               #           which refuses server dialogs; its settings must say ask for the scan tools)
                                #   console: always y in `mapper tui` or `mapper approve` on the Pi
-                               #   none: no approval here (Claude Code's own permission prompt is the only gate)
   approval_timeout_min: 10     # a request nobody approved by then expires
   default_session_minutes: 10  # budget of a session Claude asks for without giving one
   max_session_minutes: 30      # the most Claude may ask for

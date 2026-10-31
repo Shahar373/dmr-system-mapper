@@ -13,6 +13,7 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ARGS=("$@")
 SERVICE=dmr-mapper
 MCP_SERVICE=dmr-mapper-mcp
 DRY=0 FORCE=0 PULL=1 RENDER_DIR=""
@@ -51,7 +52,13 @@ if [ "$PULL" = 1 ]; then
     git status --short --untracked-files=no >&2
     exit 1
   fi
+  before="$(git rev-parse HEAD:deploy/deploy.sh 2>/dev/null || true)"
   run git pull --ff-only
+  if [ "$DRY" != 1 ] && [ "$(git rev-parse HEAD:deploy/deploy.sh 2>/dev/null || true)" != "$before" ]; then
+    # bash goes on reading the old copy of this file: the pulled one may install more (e.g. the MCP extra)
+    say "deploy.sh itself changed: running the new version"
+    exec bash "$REPO/deploy/deploy.sh" --no-pull "${ARGS[@]}"
+  fi
 fi
 echo "    at $(git log --oneline -1)"
 
