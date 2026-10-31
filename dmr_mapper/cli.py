@@ -136,6 +136,9 @@ def cmd_explain(args: argparse.Namespace) -> int:
         print(f"link #{x['link_id']}: {x['a_freq_hz'] / 1e6:.4f} MHz - {x['b_freq_hz'] / 1e6:.4f} MHz  {x['kind']}")
         print(f"  score {x['score']:.3f} -> {x['label']}" + ("  (Tier II only, capped)" if x["tier2_only"] else "")
               + f"   noisy-OR {x['positive']:.3f} x penalty {x['penalty']:.2f} ({x['contradictions']} contradictions)")
+        th = x["thresholds"]
+        print(f"  labels: confirmed >= {th['confirmed']:.2f} with explicit or manual evidence, probable >= {th['probable']:.2f},"
+              f" possible >= {th['possible']:.2f}; Tier II only: at most {th['tier2_max']:.2f}")
         for e in x["evidence"]:
             print(f"  - {e['type']:34s} raw {e['raw']:.2f} x w {e['weight']:.2f} x decay {e['decay']:.2f} = {e['contribution']:.3f}"
                   f"  support {e['support']}  seen {datetime.fromtimestamp(e['observed_at'], tz=timezone.utc):%Y-%m-%d}  [{e['source']}]")

@@ -16,6 +16,10 @@ def _pair_ev(a: CarrierInfo, b: CarrierInfo, kind: str, etype: str, raw: float, 
     return Evidence(a.freq_hz, b.freq_hz, kind, etype, raw, newest, first, 1, details).ordered()
 
 
+def _mhz(c: CarrierInfo) -> str:
+    return f"{c.freq_hz / 1e6:.4f}"
+
+
 def same_site(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
     out: list[Evidence] = []
     cs = list(ctx.carriers.values())
@@ -104,15 +108,19 @@ def neighbor(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
             if variant == "capplus" and abs(a.freq_hz - b.freq_hz) > cfg.same_site_max_span_hz * 4:
                 continue   # Cap+ site numbers repeat across unrelated networks; keep neighbours regional
             raw = 1.0 if (a_says_b and b_says_a) else 0.65
-            details = {"variant": variant, "a_site": _key_str(ka), "b_site": _key_str(kb),
-                       "bidirectional": a_says_b and b_says_a, "a_announces_b": a_says_b, "b_announces_a": b_says_a}
+            # keyed by frequency, not a/b: the link's a/b follow carrier ids, the evidence's frequencies
+            details = {"variant": variant, "sites": {_mhz(a): _key_str(ka), _mhz(b): _key_str(kb)},
+                       "bidirectional": a_says_b and b_says_a,
+                       "announced_by": [_mhz(x) for x, says in ((a, a_says_b), (b, b_says_a)) if says]}
             ev = _pair_ev(a, b, "neighbor_site", "explicit_neighbor", raw, details)
+            # the newest announcement of either side supports it (the other half may be older)
+            ev.observed_at = max(x.last_seen_structural or x.last_seen for x in (a, b))
             if variant == "tier3":
                 # the channel a neighbour announces is that site's control channel: on Capacity Max its LCN
                 for x, kx in ((a, ka), (b, kb)):
                     lcn = ctx.announced_channel(kx[1], kx[2])
                     if lcn is not None and x.t3_control:
-                        details[f"{'a' if x is a else 'b'}_announced_channel"] = lcn
+                        details.setdefault("announced_channel", {})[_mhz(x)] = lcn
                         ev.lcn_hints[x.freq_hz] = lcn
             out.append(ev)
     return out

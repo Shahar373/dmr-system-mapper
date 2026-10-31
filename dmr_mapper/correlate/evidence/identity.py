@@ -46,7 +46,8 @@ def _collect(ctx: Context, kind: str, saturation: int, etype: str) -> list[Evide
         if not shared:
             continue
         raw = min(1.0, len(shared) / saturation)
-        out.append(Evidence(a.freq_hz, b.freq_hz, "same_system", etype, round(raw, 4), newest_day * 86400 + 86399,
+        # sightings are kept per UTC day: the end of today would be in the future
+        out.append(Evidence(a.freq_hz, b.freq_hz, "same_system", etype, round(raw, 4), min(newest_day * 86400 + 86399, ctx.now),
                             (first_day or newest_day) * 86400, len(shared),
                             {"shared": len(shared), "ids": [s["value"] for s in shared[:10]]}).ordered())
     return out

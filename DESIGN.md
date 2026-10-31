@@ -96,7 +96,9 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   FFT channelizer (overlap-save, sample_rate/D per channel: 80 kHz at 2 MS/s, 7.5 kHz low-pass, discriminator, rational resampling to 48 kHz int16,
   slow level normalisation), one PCM TCP server and one DSD-FME per carrier, stderr of all of them
   into one queue, parsed and written by the session thread, committed after every block so no
-  write lock is held. A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is
+  write lock is held. Carriers asked for by frequency with a budget (MCP, `mapper decode F --minutes N`)
+  get one pass that lasts the whole budget, shared out among their slices; without a budget, one dwell.
+  A carrier that shows only `-DMR` syncs after `decode.invert_retry_s` is
   restarted with `-xr`. Survey SNR is copied into `observations.snr_db_*`.
 - **Watch** (Phase 4, `collector/watch.py`): for networks whose traffic channels transmit only during
   calls (Capacity Max). One slice for the whole session, planned around the Tier III network with
@@ -766,6 +768,14 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   it, so `mcp.approval: client` exists: Desktop's own tool prompt is the approval. Port 8765 was
   taken by another program on that Pi (8766 used). The first `deploy.sh` after the pull ran its old
   copy and skipped the `mcp` extra; it now re-executes itself when the pull changed it.
+  Claude, reading the evidence, then found site 3 of the 469 MHz network on 456.85 MHz (its own
+  Aloha: SYS 2103; neighbour link to site 1 `confirmed`) and four small faults, fixed: a decode of
+  named carriers ended after one 60 s dwell whatever the budget; identity evidence was dated the end
+  of the UTC day (in the future, so it did not decay that day); `explicit_neighbor` was dated by the
+  older of the two announcements and its details said a/b in frequency order while the link's a/b
+  follow carrier ids (now keyed by frequency); `explain` did not show the label thresholds. Rows
+  stored before the fix keep a future date until that day is over (`observed_at` only grows), or
+  until `mapper correlate --rebuild`.
 
 - **No rf evidence fixture.** `samples/surveyor` has no candidate list with SNR. `rf_profile`
   is implemented against `observations` and tested synthetically; its weight is deliberately low.

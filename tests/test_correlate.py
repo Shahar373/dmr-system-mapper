@@ -95,6 +95,8 @@ def test_tier2_links_are_capped_and_marked(synth_store):
     ex = explain(synth_store, l["id"], None, now=NOW)
     # the shared talkgroups also show in their Activity Updates (same hashed address): Tier II evidence too
     assert {e["type"] for e in ex["evidence"]} <= {"identity_radio", "identity_talkgroup", "identity_slco", "rf_profile"}
+    assert all(e["observed_at"] <= NOW for e in ex["evidence"])     # sightings per day: never the end of today
+    assert ex["thresholds"]["confirmed"] == 0.85 and ex["thresholds"]["tier2_max"] == 0.6
     assert _link(links, 164_300_000, 167_137_500) is None   # different radios, different CC
 
 
@@ -108,6 +110,12 @@ def test_tier3_system_sites_and_neighbors(synth_store):
     assert nb is not None and nb["label"] == "confirmed"
     det = next(e for e in explain(synth_store, nb["id"], None, now=NOW)["evidence"] if e["type"] == "explicit_neighbor")
     assert det["details"]["bidirectional"] is True
+    # by frequency, whatever order the link's carriers have
+    assert det["details"]["sites"] == {"165.1250": "1A2B/1/7", "165.6000": "1A2B/1/8"}
+    assert sorted(det["details"]["announced_by"]) == ["165.1250", "165.6000"]
+    newest = max(int(synth_store.scalar("SELECT MAX(last_ts) FROM csbk_events e JOIN carriers c ON c.id = e.carrier_id WHERE c.freq_hz = ?", (f,)))
+                 for f in (165_125_000, 165_600_000))
+    assert det["observed_at"] <= newest
     sysrow = next(dict(r) for r in synth_store.rows("SELECT * FROM systems WHERE sys_code = '1A2B'"))
     sites = [dict(r) for r in synth_store.rows("SELECT * FROM sites WHERE system_id = ?", (sysrow["id"],))]
     assert {s["site_number"] for s in sites} == {7, 8}              # the on-air sites (DSD-FME would print 1.8 and 1.9)

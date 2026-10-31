@@ -112,6 +112,8 @@ def test_survey_then_decode_through_the_command_queue(tmp_path, daemon_cfg):
         cmd = st.post_command(client, "test", "start_decode", {"budget_s": 60, "freqs": [165_300_000]})
         assert _wait(client, cmd)["status"] == "done"
         time.sleep(2)
+        # carriers asked for by name, with a budget: it listens for the budget, not one 4 s dwell
+        assert st.read_status(client).progress.get("dwell_s", 0) >= 50, st.read_status(client).progress
         cmd = st.post_command(client, "test", "stop")
         assert _wait(client, cmd)["status"] == "done"
         s = _wait_idle(client)

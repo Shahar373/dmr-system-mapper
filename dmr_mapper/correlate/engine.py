@@ -108,6 +108,7 @@ def explain(store: Store, link_id: int, config: dict[str, Any] | None, now: int 
         "link_id": link_id, "a_freq_hz": link["a_freq"], "b_freq_hz": link["b_freq"], "kind": link["kind"],
         "score": ls.score, "label": ls.label, "tier2_only": ls.tier2_only, "positive": ls.positive,
         "penalty": ls.penalty, "contradictions": ls.contradictions, "stored_score": link["score"], "stored_label": link["label"],
+        "thresholds": {**cfg.labels, "confirmed_needs": "explicit or operator (source manual) evidence", "tier2_max": cfg.tier2_max},
         "evidence": [
             {"type": e.type, "class": e.cls, "source": e.source, "weight": e.weight, "raw": e.raw, "decay": round(e.decay, 3),
              "contribution": round(e.contribution, 4), "observed_at": e.observed_at, "first_observed_at": e.first_observed_at,

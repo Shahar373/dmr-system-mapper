@@ -223,8 +223,9 @@ def build_server(cfg: dict[str, Any], db_path: str | Path | None = None) -> tupl
     async def decode_carriers(freqs: Annotated[list[float] | None, Field(description="carriers to decode; none: plan from the latest survey")] = None,
                               minutes: float | None = None,
                               answer: Annotated[ElicitationResult[Approval], Resolve(ask_decode)] = None) -> dict[str, Any]:
-        """Run DSD-FME on carriers (several at once when they fit in one slice). Asks the operator first.
-        Then get_fingerprint shows what was heard."""
+        """Run DSD-FME on carriers (several at once when they fit in one slice). With freqs it listens for
+        the whole `minutes`, shared among the slices; without, it plans one round from the latest survey.
+        Asks the operator first. Then get_fingerprint shows what was heard."""
         return await _session(answer, "decode", minutes=minutes, freqs=freqs)
 
     @mcp.tool(annotations=radio)
