@@ -149,7 +149,7 @@ mapper daemon                      # foreground; systemd runs this in Phase 3b
 mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
-mapper survey --sweeps 3 --then-decode --minutes 50   # three sweeps, then decode what any of them heard
+mapper survey --sweeps 3 --then-decode --minutes 50   # three sweeps, then decode what any of them heard (sweeps stop at half the budget)
 mapper survey --dwell 8                            # 8 s per step for this session only (about 7 min per sweep)
 mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the recent sweeps
 mapper stop
@@ -172,7 +172,10 @@ catch an intermittent carrier more often than one long one: each sweep is anothe
 transmission already under way when a step starts counts too. `--dwell S` changes the seconds per step for
 one session (default `survey.dwell_s`, 3: about 3 min per sweep of VHF 160-174 and UHF 400-470 MHz); it is
 refused above 11 s with the default 1 s segments and 9 dB gate, because the p95 test over more segments
-loses a weak carrier heard in one of them. The Survey tab shows in how many of the recent sweeps each hit
+loses a weak carrier heard in one of them. With `--then-decode` a further sweep starts only while it leaves
+half of the one budget to the decode. With a GPS fix, sweeps made more than `survey.plan_radius_km` (3) from
+where the receiver is now are left out of the plan, so at the next stop the decode follows what is heard
+there. A sweep cut short by the end of the budget keeps what it heard (marked `partial`). The Survey tab shows in how many of the recent sweeps each hit
 was heard. Carriers never decoded, strong, stale, or of a
 variant that announces its identity come first, and carriers that look like the same Capacity Plus
 site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double dwell, because that is what

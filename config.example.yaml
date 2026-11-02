@@ -48,6 +48,8 @@ survey:
   cycle_minutes: 30            # full survey repeat interval
   plan_window_minutes: 180     # a decode plans from every sweep of a band up to this long before its newest one,
                                # merged (mapper survey --sweeps N): a repeater quiet in one sweep is still decoded
+  plan_radius_km: 3            # ... made within this distance of where the receiver is now (GPS fix at the decode's
+                               # start): after a drive to the next stop, the earlier stop's sweeps are left out. 0: off
   same_site_max_span_hz: 5000000   # Cap+ carriers of one site are assumed within this span
   tier3_bandplans: []          # optional: [{name, base_hz, step_hz, lpcn_offset}] for LPCN->frequency
 

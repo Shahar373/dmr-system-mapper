@@ -322,7 +322,7 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
 
 
 def cmd_survey(args: argparse.Namespace) -> int:
-    from .collector.survey import check_survey_params, sweep_seconds
+    from .collector.survey import check_survey_params, sweep_seconds, sweeps_that_fit
 
     params: dict = {}
     if args.band:
@@ -342,6 +342,12 @@ def cmd_survey(args: argparse.Namespace) -> int:
     one = sweep_seconds(bands, float(sdr.get("sample_rate_hz", 2_000_000)), float(sdr.get("usable_fraction", 0.8)), dwell)
     print(f"survey: {sweeps} sweep(s) of {', '.join(str(b.get('name')) for b in bands) or 'no band'} at {dwell:g} s per step,"
           f" about {one / 60:.1f} min each", file=sys.stderr)
+    if args.then_decode and sweeps > 1:
+        total = float(args.minutes * 60) if args.minutes else float((cfg.get("daemon", {}) or {}).get("default_budget_min", 60)) * 60
+        fit = sweeps_that_fit(sweeps, one, total)
+        if fit < sweeps:
+            print(f"survey: only about {fit} of the {sweeps} sweeps fit while leaving half of the {total / 60:.0f} min to the decode",
+                  file=sys.stderr)
     if args.then_decode:
         params["then_decode"] = True
         if args.minutes:

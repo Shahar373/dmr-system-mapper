@@ -37,7 +37,7 @@ from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
-from .survey import check_survey_params, plan_window_s, recent_hits, record, sweep, sweep_seconds
+from .survey import check_survey_params, plan_radius_km, plan_window_s, recent_hits, record, sweep, sweep_seconds
 from .watch import InstancePlanner, KeyupDetector, ListenLog, plan_watch, watch_cfg, watch_instances
 
 
@@ -459,8 +459,19 @@ class Daemon:
         summary.update(dwell_s=dwell, sweeps_planned=sweeps,
                        sweep_s_estimate=round(sweep_seconds(bands, source.sample_rate, usable, dwell)), bands={}, sweeps=[])
         heard: set[int] = set()
+        # one budget for a survey and the decode after it: a further sweep starts only while it
+        # leaves at least half of that budget to the decode (the first always runs)
+        total = int(params.get("total_budget_s") or budget_s) if params.get("then_decode") else 0
+        took: list[float] = []
         for n in range(1, sweeps + 1):
             self._check(t0, budget_s)
+            if total and n > 1:
+                need = max(float(summary["sweep_s_estimate"]), max(took))
+                if time.monotonic() - t0 + need > total / 2:
+                    summary["sweeps_skipped"] = sweeps - n + 1
+                    summary["sweeps_note"] = (f"{n - 1} of {sweeps} sweeps: another one ({need / 60:.1f} min) would leave the decode"
+                                       f" less than half of the {total // 60} min")
+                    break
             sweep_t0 = time.monotonic()
             this: dict[str, int] = {}
             for band in bands:
@@ -477,10 +488,13 @@ class Daemon:
                     f = self.gps.fix()
                     return (f.lat, f.lon) if f else None
 
+                cut: list[BaseException] = []
+
                 def stop() -> bool:
                     try:
                         self._check(t0, budget_s)
-                    except SessionStop:
+                    except (SessionStop, BudgetDone) as exc:
+                        cut.append(exc)      # record what this band's sweep heard so far, then end the session
                         return True
                     return False
 
@@ -488,13 +502,20 @@ class Daemon:
                 settings = {k: v for k, v in scfg.items() if k != "bands"}
                 if sweeps > 1:
                     settings["sweep"] = f"{n}/{sweeps}"
+                if cut:
+                    settings["partial"] = True
                 run_id = record(store, str(band.get("name")), started, hits, source.describe(), settings)
                 heard.update(h.freq_hz for h in hits)
                 this[str(band.get("name"))] = len(hits)
                 summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits),
                                                            "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
                 self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
-            summary["sweeps"].append({"sweep": n, "seconds": round(time.monotonic() - sweep_t0), "hits": this})
+                if cut:
+                    summary["sweeps"].append({"sweep": n, "seconds": round(time.monotonic() - sweep_t0), "hits": this, "partial": True})
+                    summary["distinct_hits"] = len(heard)
+                    raise cut[0]
+            took.append(time.monotonic() - sweep_t0)
+            summary["sweeps"].append({"sweep": n, "seconds": round(took[-1]), "hits": this})
             summary["distinct_hits"] = len(heard)
 
     # -- decode ------------------------------------------------------------------------------------
@@ -508,9 +529,23 @@ class Daemon:
         summary["carriers"] = {}
         summary["slices"] = []
         rounds = 0
+        radius = plan_radius_km(self.cfg)
+        if radius and not only:
+            # the plan follows the receiver: sweeps made at an earlier stop are left out. A fresh
+            # session's GPS may need a moment for its first fix.
+            deadline = time.monotonic() + 5
+            while self.gps.fix() is None and not isinstance(self.gps, NoGps) and time.monotonic() < deadline:
+                self._check(t0, budget_s)
+                time.sleep(0.25)
         while True:
             self._check(t0, budget_s)
-            hits = recent_hits(store, plan_window_s(self.cfg), max_age_s=7 * 86400)
+            f = self.gps.fix() if radius and not only else None
+            here = (f.lat, f.lon) if f else None
+            far: list[int] = []
+            hits = recent_hits(store, plan_window_s(self.cfg), max_age_s=7 * 86400, near=here, radius_km=radius, far_runs=far)
+            summary["plan"] = ({"position": [round(here[0], 5), round(here[1], 5)], "radius_km": radius, "far_sweeps_left_out": len(far)}
+                               if here else {"position": None, "note": "no GPS fix: sweeps from every place count" if radius and not only else
+                                             "plan_radius_km 0 or carriers given: sweeps from every place count"})
             targets = targets_from_store(store, self.cfg, hits, only_freqs=only or None)
             if not targets:
                 summary["note"] = "no carriers to decode: run a survey first"

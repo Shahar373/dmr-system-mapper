@@ -97,10 +97,17 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   loud segment weighs less the more there are, and nothing from 21 on): 11 s with the defaults.
   Seconds per step and sweep: dwell 3 s: 12 dB / 20 dB one-second burst read as 11.6 / 19.5 dB, sweep of
   both default bands (53 steps) 2.7 min; 8 s: 10.3 / 18.2 dB, 7.2 min; 12 s: 8.9 (lost) / 16.6 dB, 10.7 min.
+  With `then_decode`, sweep n > 1 starts only if the elapsed time plus one sweep (the longer of the
+  estimate and the slowest so far) stays within half the one budget (`sweeps_skipped`, `sweeps_note`).
+  A sweep cut by the budget or a stop records what its band heard so far (`settings.partial`).
 - **Decode**: targets are the hits of the recent sweeps (`recent_hits`: per band name, the newest run
   younger than 7 days and every run up to `survey.plan_window_minutes` (180) before it, merged per
   frequency with the values of the strongest sweep, `heard_in` and `sweeps`) plus the carriers seen in
   30 days. Before, only the newest run per band counted, so a second sweep hid what the first had heard.
+  With a GPS fix at the decode's start (up to 5 s are waited for one), runs whose mean hit position is
+  more than `survey.plan_radius_km` (3) away are left out first (`summary.plan.far_sweeps_left_out`);
+  runs without positions always count. Carriers already in the database are still targets wherever
+  they were heard (30 days): a decode after a drive tries them once, and those with no DMR score low.
   The scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
   variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
   Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
@@ -953,8 +960,7 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   1 - exp(-n (dwell + 5 s) / 60 s)). Several sweeps merged for planning beat one long dwell, which is
   why `--sweeps` exists and the planner merges the recent sweeps. Neither catches a repeater that is
   used a few times an hour: a watch session on its slice does. The window ignores where the receiver
-  was: after a drive, hits from 2-3 hours ago at another place are still planned for (and score low
-  once decoded without DMR); `survey.plan_window_minutes` shortens it.
+  was only when there is no GPS fix; with one, `survey.plan_radius_km` leaves the other stops' sweeps out.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded
   at that moment is simply not corroborated; behavioural evidence accumulates slowly and that is
   expected. A wideband channelizer is a later optimisation.
