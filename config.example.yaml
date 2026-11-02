@@ -53,6 +53,12 @@ survey:
   same_site_max_span_hz: 5000000   # Cap+ carriers of one site are assumed within this span
   tier3_bandplans: []          # optional: [{name, base_hz, step_hz, lpcn_offset}] for LPCN->frequency
 
+campaign:                      # mapper campaign / console key m: one budget for one stop, in cycles of survey, decode, watch
+  cycle_minutes: 45            # a 3-hour campaign is 4 cycles, a 45-minute one is 1
+  mix: {survey: 0.15, decode: 0.50, watch: 0.35}   # share of each cycle; no slice worth watching: the decode gets it
+  min_decode_s: 60             # a step shorter than this is skipped
+  min_watch_s: 120
+
 decode:
   dsd_fme_bin: dsd-fme         # name on PATH or absolute path
   extra_args: []               # appended to the DSD-FME command line (see CAPTURE.md §2)

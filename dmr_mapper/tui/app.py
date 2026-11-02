@@ -23,7 +23,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane, Tree
 
 from ..collector import state as st
-from ..collector.survey import plan_window_s, recent_hits
+from ..collector.hits import plan_window_s, recent_hits
 from ..correlate.names import display, set_name
 from ..db import Store
 
@@ -93,6 +93,10 @@ class StatusBar(Static):
             else:
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} ({c.get('syncs', 0)} syncs)" for c in pr.get("carriers", []))
                 line2 = f"decode #{s.session_id}: slice {pr.get('slice', '?')}/{pr.get('slices', '?')} ({pr.get('reason', '')}) {pr.get('slice_elapsed_s', 0)}/{pr.get('dwell_s', '?')} s: {cs}{tail}"
+        if s.mode in ("survey", "decode", "watch") and pr.get("campaign"):
+            c = pr["campaign"]
+            left = max(0, int(c["deadline"]) - int(datetime.now(tz=timezone.utc).timestamp()))
+            line2 += f"   [b]campaign[/] cycle {c['cycle']}/{c['cycles']}, {left // 60} min left"
         if s.mode in ("survey", "decode", "watch"):
             g = pr.get("gps")
             line2 += f"\nGPS {g['lat']:.5f}, {g['lon']:.5f} ({g['fix']})" if g else f"\nGPS: no fix ({pr.get('gps_source', '?')})"
@@ -111,7 +115,7 @@ class MapperApp(App[None]):
     """
     BINDINGS = [
         Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"),
-        Binding("w", "watch", "Watch"), Binding("x", "stop", "Stop"),
+        Binding("w", "watch", "Watch"), Binding("m", "campaign", "Campaign"), Binding("x", "stop", "Stop"),
         Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("n", "name", "Name"), Binding("r", "refresh", "Refresh"),
         Binding("y", "approve", "Approve Claude"), Binding("v", "refuse", "Refuse Claude"), Binding("q", "quit", "Quit"),
     ]
@@ -142,6 +146,7 @@ class MapperApp(App[None]):
                 yield Button("Survey (s)", id="survey", variant="primary")
                 yield Button("Decode (d)", id="decode", variant="primary")
                 yield Button("Watch slice (w)", id="watch", variant="primary")
+                yield Button("Campaign (m)", id="campaign", variant="primary")
                 yield Button("Stop (x)", id="stop", variant="error")
                 yield Button("Correlate (c)", id="correlate")
                 yield Button("Export map (e)", id="export")
@@ -330,6 +335,13 @@ class MapperApp(App[None]):
             params["budget_s"] = b
         self._post("start_watch", params)
 
+    def action_campaign(self) -> None:
+        """Survey, decode and watch in cycles at this stop, for the whole budget."""
+        params: dict[str, Any] = {}
+        if (b := self._budget_s()) is not None:
+            params["budget_s"] = b
+        self._post("start_campaign", params)
+
     def action_name(self) -> None:
         if self._selected is None:
             self.query_one("#log", RichLog).write("[yellow]select a system or site on the Systems tab first[/]")
@@ -401,7 +413,7 @@ class MapperApp(App[None]):
 
     @on(Button.Pressed)
     def _button(self, event: Button.Pressed) -> None:
-        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "watch": self.action_watch, "stop": self.action_stop,
+        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "watch": self.action_watch, "campaign": self.action_campaign, "stop": self.action_stop,
                   "correlate": self.action_correlate, "export": self.action_export}.get(event.button.id or "")
         if action:
             action()

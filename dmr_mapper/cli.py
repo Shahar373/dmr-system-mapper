@@ -159,13 +159,16 @@ def cmd_export(args: argparse.Namespace) -> int:
             print(f"wrote {p}")
         print(f"{g.number_of_nodes()} nodes, {g.number_of_edges()} edges (>= {args.min_label})")
         return 0
+    from .export.coverage import coverage
+
     with _open_store(args, cfg) as store:
         g = build(store, min_label=args.min_label)
+        cov = coverage(store, cfg)
     exports = resolve_path(cfg, "exports")
     if not (args.html or args.graphml or args.json_path):
         args.html = str(exports / "map.html")
     if args.html:
-        write(g, args.html)
+        write(g, args.html, coverage=cov)
         print(f"wrote {args.html}")
     if args.graphml:
         write_graphml(g, args.graphml)
@@ -298,17 +301,24 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
         if sess and sess["status"] in ("done", "stopped", "failed"):
             print(f"session {session_id} {sess['status']} after {sess['summary'].get('elapsed_s', 0)} s")
             print(json.dumps({k: v for k, v in sess["summary"].items() if k != "traceback"}, indent=2)[:4000])
-            if sess["status"] != "failed" and sess["summary"].get("then_decode_s"):
-                # the one-button flow: the daemon queued a decode; follow that one too
+            sm = sess["summary"]
+            if sess["status"] != "failed" and (sm.get("then_decode_s") or sm.get("campaign_next")):
+                # the one-button flow or a campaign: the daemon queued the next session; follow that one too
                 deadline = time.monotonic() + 60
                 while time.monotonic() < deadline:
-                    nxt = next((x for x in st.sessions(store, 5) if x["id"] > session_id and x["kind"] == "decode"), None)
+                    nxt = next((x for x in st.sessions(store, 5) if x["id"] > session_id
+                                and (sm.get("campaign_next") or x["kind"] == "decode")), None)
                     if nxt is not None:
-                        print(f"decode session {nxt['id']} follows ({sess['summary']['then_decode_s']} s)")
+                        if sm.get("campaign_next"):
+                            print(f"session {nxt['id']} follows: {sm['campaign_next']}")
+                        else:
+                            print(f"decode session {nxt['id']} follows ({sm['then_decode_s']} s)")
                         return _follow(store, cfg, int(nxt["id"]))
                     time.sleep(0.5)
-                print("the queued decode did not start: see `mapper status` and the command log", file=sys.stderr)
+                print("the queued session did not start: see `mapper status` and the command log", file=sys.stderr)
                 return 1
+            if sm.get("campaign_done"):
+                print("campaign done: the map is being exported (var/exports/map.html, with its coverage section)")
             return 0 if sess["status"] != "failed" else 1
         if not s.alive:
             print("daemon went away", file=sys.stderr)
@@ -353,6 +363,29 @@ def cmd_survey(args: argparse.Namespace) -> int:
         if args.minutes:
             params["total_budget_s"] = int(args.minutes * 60)
     return _session_command(args, "start_survey", params)
+
+
+def cmd_campaign(args: argparse.Namespace) -> int:
+    from .collector.campaign import campaign_cfg, new_campaign, one_sweep_s, survey_step
+    from .collector.survey import check_survey_params
+
+    cfg = load_config(args.config)
+    params: dict = {"watch": not args.no_watch}
+    if args.dwell is not None:
+        params["dwell_s"] = float(args.dwell)
+        try:
+            check_survey_params({"dwell_s": params["dwell_s"]}, cfg)
+        except ValueError as exc:
+            print(f"campaign: {exc}", file=sys.stderr)
+            return 2
+    if args.minutes:
+        camp = new_campaign(int(args.minutes * 60), cfg, dwell_s=params.get("dwell_s"), watch=params["watch"])
+        _, first = survey_step(camp, cfg)
+        mix = campaign_cfg(cfg)["mix"]
+        print(f"campaign: {camp['cycles']} cycle(s) of about {camp['cycle_s'] / 60:.0f} min: {first['sweeps']} sweep(s) of about"
+              f" {one_sweep_s(cfg, params.get('dwell_s')) / 60:.1f} min, then decode ({mix['decode']:.0%}) and watch"
+              f" ({mix['watch']:.0%})" + ("" if params["watch"] else ", without watch"), file=sys.stderr)
+    return _session_command(args, "start_campaign", params)
 
 
 def cmd_decode(args: argparse.Namespace) -> int:
@@ -708,6 +741,14 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--wait", action="store_true", default=True, help="follow the session until it ends (default)")
     sv.add_argument("--no-wait", dest="wait", action="store_false")
     sv.set_defaults(func=cmd_survey)
+
+    cp = sub.add_parser("campaign", help="survey, decode and watch in cycles at one stop, in one budget (a chain of sessions)")
+    cp.add_argument("--minutes", type=float, help="the whole campaign (default daemon.default_budget_min, or the battery one)")
+    cp.add_argument("--dwell", type=float, metavar="S", help="seconds per survey step for this campaign (default survey.dwell_s)")
+    cp.add_argument("--no-watch", action="store_true", help="survey and decode only")
+    cp.add_argument("--wait", action="store_true", default=True, help="follow every step until the campaign ends (default)")
+    cp.add_argument("--no-wait", dest="wait", action="store_false")
+    cp.set_defaults(func=cmd_campaign)
 
     dc = sub.add_parser("decode", help="start a decode session (recent survey hits, or the given frequencies)")
     dc.add_argument("freq", nargs="*", help="frequencies in Hz (default: plan from the recent sweeps, survey.plan_window_minutes)")

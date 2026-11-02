@@ -143,6 +143,15 @@ def build_server(cfg: dict[str, Any], db_path: str | Path | None = None) -> tupl
         return await _call(tools.list_survey_hits, band, run_id, min_snr_db, limit)
 
     @mcp.tool(annotations=read)
+    async def get_coverage(days: Annotated[float, Field(description="look back this many days (max 90)")] = 7) -> dict[str, Any]:
+        """Coverage per stop (a place sweeps were made from, by the receiver's GPS): when, sweeps per band
+        (full / partial, dwell), carriers heard (strongest first, heard_in of sweeps), intermittent ones
+        (watch candidates), decode and watch minutes there, gaps (bands never swept in full, or once),
+        and sites announced on air but never heard, with the stop where their system was strongest
+        (a hint where to listen, not a direction). Use it to suggest what to scan at the next stop."""
+        return await _call(tools.get_coverage, days)
+
+    @mcp.tool(annotations=read)
     async def query_systems(system_id: int | None = None, freq: Freq | None = None,
                             min_confidence: Annotated[float, Field(description="links scored below this are left out")] = 0.3) -> dict[str, Any]:
         """Systems → sites → carriers (with LCNs), and the links among them with scores and labels.

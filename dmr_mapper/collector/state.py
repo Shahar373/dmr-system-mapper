@@ -21,7 +21,7 @@ from typing import Any
 
 from ..db import Store, canonical_json
 
-COMMAND_KINDS = ("start_survey", "start_decode", "start_watch", "stop", "correlate", "export")
+COMMAND_KINDS = ("start_survey", "start_decode", "start_watch", "start_campaign", "stop", "correlate", "export")
 SESSION_KINDS = ("survey", "decode", "watch")
 
 

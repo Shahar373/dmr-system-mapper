@@ -32,6 +32,7 @@ from . import state as st
 from .bridge import PcmServer
 from .channelizer import AUDIO_RATE, Channelizer
 from .decoder import DecoderProcess, find_dsd_fme
+from . import campaign as camp_mod
 from .gps import NoGps, open_gps
 from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
@@ -232,7 +233,7 @@ class Daemon:
     def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str] | None:
         assert self._store is not None
         kind, params = cmd["kind"], cmd.get("params") or {}
-        if kind in ("start_survey", "start_decode", "start_watch"):
+        if kind in ("start_survey", "start_decode", "start_watch", "start_campaign"):
             mcp_timeout = int(float((self.cfg.get("mcp", {}) or {}).get("approval_timeout_min", 10)) * 60) + 120
             if cmd.get("source") == "mcp" and time.time() - int(cmd.get("created") or 0) > mcp_timeout:
                 # asked for by Claude long ago (the daemon was down): the place and the question have moved on
@@ -243,8 +244,19 @@ class Daemon:
                 self.session_thread.join(timeout=30)
             if self.session_thread is not None and self.session_thread.is_alive():
                 return False, f"a {self.session_kind} session is already running (#{self.session_id}); stop it first"
-            if kind in ("start_decode", "start_watch") and find_dsd_fme(self.cfg) is None:
+            if kind in ("start_decode", "start_watch", "start_campaign") and find_dsd_fme(self.cfg) is None:
                 return False, "dsd-fme not found (decode.dsd_fme_bin)"
+            if kind == "start_campaign":
+                # a campaign is a chain of ordinary sessions: it starts as the survey of its first cycle
+                try:
+                    if params.get("dwell_s") is not None:
+                        check_survey_params({"dwell_s": params["dwell_s"]}, self.cfg)
+                    first_budget = int(params.get("budget_s") or budget_for(read_power(self.cfg), self.cfg)[1])
+                    camp = camp_mod.new_campaign(first_budget, self.cfg, dwell_s=params.get("dwell_s"),
+                                                 watch=bool(params.get("watch", True)))
+                except (TypeError, ValueError) as exc:
+                    return False, str(exc)
+                kind, params = camp_mod.survey_step(camp, self.cfg)
             if kind == "start_survey":
                 try:      # a dwell the hit test cannot honour is a refusal, before the receiver is touched
                     check_survey_params(params, self.cfg)
@@ -282,6 +294,9 @@ class Daemon:
             self._closing.clear()
             self._stop_reason = None
             self.progress = {"kind": session_kind, "phase": "starting"}
+            if params.get("campaign"):
+                c = params["campaign"]
+                self.progress["campaign"] = {"cycle": c["cycle"], "cycles": c["cycles"], "step": c["step"], "deadline": c["deadline"]}
             self.message = f"{session_kind} session #{sid} started ({budget // 60} min budget, {self.power.short()})"
             self.session_thread = threading.Thread(target=self._session_main, args=(sid, session_kind, params, budget, source),
                                                    name=f"session-{sid}", daemon=True)
@@ -430,6 +445,17 @@ class Daemon:
             from ..correlate import run as correlate
             rep = correlate(store, self.cfg)
             summary["correlate"] = {"links": rep.links_scored, "by_label": rep.links_by_label, "sites": rep.sites, "systems": rep.systems}
+        if (params.get("campaign") and "error" not in summary and not self.session_stop.is_set()
+                and not self.stop_event.is_set()):
+            pos = summary.get("position_end") or None
+            near = (float(pos["lat"]), float(pos["lon"])) if pos else None
+            step = camp_mod.next_step(store, self.cfg, params["campaign"], kind, near=near)
+            if step is None:
+                summary["campaign_done"] = True
+                st.post_command(store, "daemon", "export", {})
+            else:
+                st.post_command(store, "daemon", step[0], step[1])
+                summary["campaign_next"] = st.describe_request(step[0], step[1])
         if (kind == "survey" and params.get("then_decode") and "error" not in summary
                 and not self.session_stop.is_set() and not self.stop_event.is_set()):
             # one button, one budget: the decode gets what the survey left over

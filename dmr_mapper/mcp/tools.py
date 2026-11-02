@@ -304,7 +304,7 @@ class MapperTools:
 
     def list_survey_hits(self, band: str | None = None, run_id: int | None = None, min_snr_db: float | None = None,
                          limit: int = 200) -> dict[str, Any]:
-        from ..collector.survey import plan_window_s, recent_hits
+        from ..collector.hits import plan_window_s, recent_hits
 
         with self.store() as s:
             if run_id is not None:
@@ -328,6 +328,19 @@ class MapperTools:
                         "snr_db": h["snr_db"], "p95_snr_db": h["p95_snr_db"], "occupancy_pct": h["occupancy_pct"], "width_hz": h["width_hz"],
                         "class": h["class"], "known_as": variant, "heard_in": h.get("heard_in", 1), "sweeps": h.get("sweeps", 1)})
         return {"count": len(out), "hits": out[:max(1, int(limit))], "truncated": len(out) > int(limit)}
+
+    def get_coverage(self, days: float = 7) -> dict[str, Any]:
+        """Where and how thoroughly the bands were swept, and what is still missing (export/coverage.py)."""
+        from ..export.coverage import coverage
+
+        if not 0 < float(days) <= 90:
+            raise ValueError("days must be between 0 and 90")
+        with self.store() as s:
+            rep = coverage(s, self.cfg, float(days))
+        rep["generated"] = self.iso(rep["generated"])
+        for st_ in rep["stops"]:
+            st_["first"], st_["last"] = self.iso(st_["first"]), self.iso(st_["last"])
+        return rep
 
     # -- systems and links ------------------------------------------------------------------------
     def query_systems(self, system_id: int | None = None, freq: float | int | None = None, min_confidence: float = 0.3) -> dict[str, Any]:
