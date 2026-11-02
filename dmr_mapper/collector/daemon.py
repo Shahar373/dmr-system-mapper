@@ -38,7 +38,7 @@ from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
 from .survey import latest_hits, record, sweep
-from .watch import InstancePlanner, KeyupDetector, plan_watch, watch_cfg, watch_instances
+from .watch import InstancePlanner, KeyupDetector, ListenLog, plan_watch, watch_cfg, watch_instances
 
 
 log = logging.getLogger("dmr_mapper.daemon")
@@ -612,7 +612,8 @@ class Daemon:
         block_s = chan.hop / source.sample_rate
         history: "deque[tuple[np.ndarray, int]]" = deque(maxlen=max(1, int(round(float(w["preroll_s"]) / block_s)) + 1))
         detector = KeyupDetector(plan.channels, float(w["keyup_snr_db"]), float(w["keydown_snr_db"]), float(w["hang_s"]))
-        planner = InstancePlanner(plan.pinned, limit, float(w["max_hold_s"]), plan.priority)
+        planner = InstancePlanner(plan.pinned, limit, float(w["max_hold_s"]), plan.priority, min_hold_s=float(w["min_decoder_s"]))
+        heard = ListenLog(no_dmr_after_s=float(w["no_dmr_after_s"]))
         base_port = int((self.cfg.get("decode", {}) or {}).get("tcp_base_port", 7355))
         # twice as many ports as decoders, used in turn, each back only once its old DSD-FME is gone
         free_ports = deque(base_port + i for i in range(2 * limit))
@@ -622,21 +623,22 @@ class Daemon:
         ingests: dict[int, CarrierIngest] = {}
         unheard: dict[int, list[str]] = {}         # lines of a channel whose DSD-FME has not printed a DMR sync yet
         retiring: list[threading.Thread] = []
-        decoded_now: set[int] = set()            # channels whose current key-up had a decoder at some point
         restarts: dict[int, int] = {}
         per: dict[str, dict[str, Any]] = {}
-        totals = {"keyups": 0, "decoded": 0, "missed": 0, "blips": 0, "preempted": 0}
+        # decoded: DMR heard during the key-up; listened: a connected DSD-FME had its audio
+        totals = {"keyups": 0, "decoded": 0, "listened": 0, "missed": 0, "no_decoder": 0, "blips": 0, "preempted": 0}
         timing = {"blocks": 0, "busy_s": 0.0, "max_ms": 0.0}
         slow: list[dict[str, Any]] = []          # the slowest blocks, with where the time went
         overflow_at: list[int] = []              # when the receiver dropped samples
-        started_at: dict[int, float] = {}
-        no_dmr: set[int] = set()                 # decoded for a while without DMR: last in line for the session
+        no_dmr: set[int] = set()                 # listened to for a while without DMR: last in line for the session
         overflows0 = int(getattr(source, "overflows", 0) or 0)
         backlog = int(AUDIO_RATE * 2 * (float(w["preroll_s"]) + 3.0))   # pre-roll + DSD-FME start-up, int16
 
-        def retire(f: int) -> None:
+        def retire(f: int, final: bool = False) -> None:
             d, srv = decoders.pop(f, None), servers.pop(f, None)
             chan.remove_channel(f)
+            if srv is not None and not final:
+                heard.retired(f, srv.ever_connected)
 
             def run() -> None:
                 if srv is not None:
@@ -656,7 +658,6 @@ class Daemon:
             decoders[f] = DecoderProcess(self.cfg, f, port, lines)
             decoders[f].start()
             chan.add_channel(f)
-            started_at[f] = time.monotonic()
             for Xh, n0h in history:                  # the moments before the key-up, oldest first
                 pcm = chan.extract(Xh, n0h, only=[f]).get(f)
                 if pcm is not None:
@@ -670,6 +671,8 @@ class Daemon:
                     return
                 if line is None:
                     continue
+                if "Sync:" in line and "DMR" in line:
+                    heard.heard_dmr(f)
                 ing = ingests.get(f)
                 if ing is None:
                     buf = unheard.setdefault(f, [])
@@ -683,20 +686,25 @@ class Daemon:
                     continue
                 ing.feed(line)
 
-        def record_keyup(k: Any, decoded: bool) -> None:
+        def record_keyup(k: Any) -> None:
+            listened, dmr = heard.keyup_ended(k.freq_hz)
             if k.duration < float(w["min_keyup_s"]) and k.freq_hz not in plan.pinned:
                 totals["blips"] += 1
                 return
-            stats = per.setdefault(str(k.freq_hz), {"keyups": 0, "airtime_s": 0.0, "decoded": 0})
+            stats = per.setdefault(str(k.freq_hz), {"keyups": 0, "airtime_s": 0.0, "decoded": 0, "listened": 0})
             cid = store.upsert_carrier(k.freq_hz, int(k.start), _band_for(self.cfg, k.freq_hz))
             store.upsert_carrier_seen(cid, int(k.start), int(k.end))
-            store.conn.execute("INSERT INTO keyups (carrier_id, session_id, start, end, peak_snr_db, decoded) VALUES (?, ?, ?, ?, ?, ?)",
-                               (cid, sid, round(k.start, 2), round(k.end, 2), k.peak_snr_db, int(decoded)))
+            store.conn.execute("INSERT INTO keyups (carrier_id, session_id, start, end, peak_snr_db, decoded, dmr_heard)"
+                               " VALUES (?, ?, ?, ?, ?, ?, ?)",
+                               (cid, sid, round(k.start, 2), round(k.end, 2), k.peak_snr_db, int(listened), int(dmr)))
             stats["keyups"] += 1
             stats["airtime_s"] = round(stats["airtime_s"] + k.duration, 1)
-            stats["decoded"] += int(decoded)
+            stats["decoded"] += int(dmr)
+            stats["listened"] += int(listened)
             totals["keyups"] += 1
-            totals["decoded" if decoded else "missed"] += 1
+            totals["decoded" if dmr else "missed"] += 1
+            totals["listened"] += int(listened)
+            totals["no_decoder"] += int(not listened)
 
         def load() -> dict[str, Any]:
             n = max(1, timing["blocks"])
@@ -724,20 +732,22 @@ class Daemon:
                 history.append((X, n0))
                 started, ended = detector.update(t, chan.channel_power(X, plan.channels, float(w["channel_width_hz"])))
                 lap = {"dsp": time.monotonic() - busy0}
+                for f in started:
+                    heard.keyup_started(f)
                 for k in ended:
-                    record_keyup(k, k.freq_hz in decoded_now or k.freq_hz in servers)
-                    decoded_now.discard(k.freq_hz)
+                    record_keyup(k)
                 to_start, to_stop = planner.plan(t, detector.active())
                 totals["preempted"] += sum(1 for f in to_stop if f in detector.active())
                 for f in to_stop:
                     retire(f)
                 for f in to_start:
                     start_decoder(f)
-                    decoded_now.add(f)
                 lap["decoders"] = time.monotonic() - busy0
                 fresh = set(to_start)
                 for f, pcm in chan.extract(X, n0, only=[f for f in servers if f not in fresh]).items():
                     servers[f].write(pcm)
+                for f, srv in servers.items():
+                    heard.tick(f, block_s, srv.connected)
                 lap["audio"] = time.monotonic() - busy0
                 drain()
                 lap["lines"] = time.monotonic() - busy0
@@ -746,10 +756,11 @@ class Daemon:
                 lap["commit"] = time.monotonic() - busy0
                 now = time.monotonic()
                 if now - last_check >= 2:
-                    # a channel decoded for 8 s without DMR (analogue, another protocol): it gives its
-                    # decoder back and is last in line for the rest of the session
+                    # a channel listened to for ``no_dmr_after_s`` without DMR (analogue, another protocol),
+                    # counted over all its key-ups (short ones never last that long): it gives its decoder
+                    # back and is last in line for the rest of the session
                     for f in list(servers):
-                        if f not in plan.pinned and f not in no_dmr and now - started_at.get(f, now) >= 8 and syncs(f) < 5:
+                        if f not in plan.pinned and f not in no_dmr and heard.no_dmr(f, syncs(f)):
                             no_dmr.add(f)
                             planner.priority[f] = 3
                             planner.assigned.pop(f, None)
@@ -795,21 +806,22 @@ class Daemon:
         finally:
             # processes and ports first, whatever happens to the writes below
             for f in list(servers):
-                retire(f)
+                retire(f, final=True)
             for th in retiring:
                 th.join(timeout=10)
             drain()
             try:
                 for k in detector.close():
-                    record_keyup(k, k.freq_hz in decoded_now)
+                    record_keyup(k)
                 for f, ing in ingests.items():
                     ing.finish()
                     r = ing.summary()
-                    per.setdefault(str(f), {"keyups": 0, "airtime_s": 0.0, "decoded": 0}).update(
+                    per.setdefault(str(f), {"keyups": 0, "airtime_s": 0.0, "decoded": 0, "listened": 0}).update(
                         {k: r[k] for k in ("lines", "syncs", "structural", "variant", "identities")})
                 store.commit()
             finally:
                 summary["watch"] = {**totals, **load(), "restarts": restarts, "no_dmr": sorted(set(unheard) | no_dmr),
+                                    "never_connected": {str(f): n for f, n in sorted(heard.never_connected.items())},
                                     "slow_blocks": slow, "overflow_at": overflow_at}
                 summary["carriers"] = per
 

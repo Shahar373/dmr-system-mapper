@@ -149,7 +149,7 @@ def test_migration_removes_radio_coordinates(tmp_path):
     s.commit()
     s.close()
     with Store(db) as s:
-        assert s.schema_version() == 5
+        assert s.schema_version() == 6
         payloads = [json.loads(r["payload"]) for r in s.rows("SELECT payload FROM csbk_events ORDER BY id")]
     assert payloads == [{"src": 1, "tgt": 2, "direction": "response", "has_position": True},
                         {"src": 3, "tgt": 2, "direction": "response", "has_position": False}]

@@ -40,7 +40,7 @@ CONTROL_SOURCES = ("c_aloha_sys_parms", "slc_c_sys_parms")
 
 def watch_cfg(cfg: dict[str, Any]) -> dict[str, Any]:
     w = {"keyup_snr_db": 10.0, "keydown_snr_db": 6.0, "hang_s": 2.0, "min_keyup_s": 0.5, "max_hold_s": 30.0,
-         "preroll_s": 0.5, "max_instances": 6, "channel_width_hz": 10_000}
+         "preroll_s": 0.5, "max_instances": 6, "channel_width_hz": 10_000, "min_decoder_s": 4.0, "no_dmr_after_s": 8.0}
     w.update(cfg.get("watch", {}) or {})
     return w
 
@@ -287,7 +287,12 @@ class InstancePlanner:
     within one priority, the most recent key-up first (a call is short; a carrier keyed since the
     start of the session is most likely a continuous one). A waiting channel takes the decoder of
     a lower-priority one at once, and of an equal one that has held it for ``max_hold_s``; the
-    channel that gave way is not taken again until it has keyed down."""
+    channel that gave way is not taken again until it has keyed down.
+
+    A decoder is kept ``min_hold_s`` after it started even when its channel has keyed down: DSD-FME
+    needs a moment to start and connect, and a key-up shorter than that plus ``hang_s`` would
+    otherwise close its audio before it ever arrives (469.1 MHz, 2026-10-31: key-ups of 1.3 s, 42
+    connections refused). Such a lingering decoder gives way at once to a channel that is waiting."""
 
     pinned: list[int]
     limit: int
@@ -295,6 +300,7 @@ class InstancePlanner:
     priority: dict[int, int] = field(default_factory=dict)
     assigned: dict[int, float] = field(default_factory=dict)     # freq → since when it has a decoder
     cooldown: set[int] = field(default_factory=set)
+    min_hold_s: float = 0.0
 
     def __post_init__(self) -> None:
         self.pinned = list(self.pinned)[:max(1, self.limit)]
@@ -317,14 +323,22 @@ class InstancePlanner:
             if f not in self.assigned:
                 self.assigned[f] = t
                 start.append(f)
+        lingering = []
         for f in list(self.assigned):
             if f not in self.pinned and f not in active:
+                if t - self.assigned[f] < self.min_hold_s:
+                    lingering.append(f)          # keyed down, but its decoder is still starting
+                    continue
                 del self.assigned[f]
                 stop.append(f)
         self.cooldown &= set(active)
         waiting = sorted((f for f in active if f not in self.assigned and f not in self.cooldown and f not in self.pinned),
                          key=lambda f: (self._prio(f), -active[f]))
         for f in waiting:
+            if len(self.assigned) >= self.limit and lingering:
+                g = lingering.pop(0)
+                del self.assigned[g]
+                stop.append(g)
             if len(self.assigned) >= self.limit:
                 g = self._victim(t, self._prio(f))
                 if g is None:
@@ -338,3 +352,47 @@ class InstancePlanner:
 
     def waiting(self, active: dict[int, float]) -> list[int]:
         return sorted(f for f in active if f not in self.assigned)
+
+
+@dataclass
+class ListenLog:
+    """What the decoders of a watch session actually heard.
+
+    * per key-up: whether a DSD-FME was connected and fed during it (``listened``, stored as
+      ``keyups.decoded``) and whether it printed a DMR sync (``dmr``, ``keyups.dmr_heard``). Having a
+      decoder assigned is not enough for either: its DSD-FME may not have connected yet.
+    * per channel, over the whole session: the seconds a connected decoder listened. A channel heard
+      that long without DMR is not DMR (``no_dmr``), even when no single key-up lasts that long.
+    * decoders retired before their DSD-FME ever connected (``never_connected``)."""
+
+    no_dmr_after_s: float = 8.0
+    listen_s: dict[int, float] = field(default_factory=dict)
+    never_connected: dict[int, int] = field(default_factory=dict)
+    _listened: set[int] = field(default_factory=set)
+    _dmr: set[int] = field(default_factory=set)
+
+    def keyup_started(self, f: int) -> None:
+        self._listened.discard(f)
+        self._dmr.discard(f)
+
+    def tick(self, f: int, dt: float, connected: bool) -> None:
+        if connected:
+            self.listen_s[f] = self.listen_s.get(f, 0.0) + dt
+            self._listened.add(f)
+
+    def heard_dmr(self, f: int) -> None:
+        self._dmr.add(f)
+
+    def keyup_ended(self, f: int) -> tuple[bool, bool]:
+        """(listened, DMR heard) for the key-up that just ended."""
+        out = (f in self._listened, f in self._dmr)
+        self._listened.discard(f)
+        self._dmr.discard(f)
+        return out
+
+    def retired(self, f: int, ever_connected: bool) -> None:
+        if not ever_connected:
+            self.never_connected[f] = self.never_connected.get(f, 0) + 1
+
+    def no_dmr(self, f: int, syncs: int) -> bool:
+        return self.listen_s.get(f, 0.0) >= self.no_dmr_after_s and syncs < 5

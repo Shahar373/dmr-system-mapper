@@ -17,7 +17,7 @@ from dmr_mapper.collector.channelizer import Channelizer
 from dmr_mapper.collector.daemon import Daemon
 from dmr_mapper.collector.power import PowerState
 from dmr_mapper.collector.sdr import SyntheticBackend, SyntheticSource, SynthCarrier
-from dmr_mapper.collector.watch import InstancePlanner, KeyupDetector, plan_watch, watch_instances
+from dmr_mapper.collector.watch import InstancePlanner, KeyupDetector, ListenLog, plan_watch, watch_instances
 from dmr_mapper.db import Store
 
 from test_collector_daemon import FAKE, _audio, _wait, _wait_idle
@@ -135,6 +135,40 @@ def test_instance_planner_pins_preempts_and_cools_down():
     assert p.plan(46, {20: 46}) == ([20], [])                             # keyed again: welcome back
 
 
+def test_a_decoder_outlives_a_short_keyup_until_someone_waits():
+    """469.1 MHz, 2026-10-31: key-ups of 1.3 s closed each decoder before DSD-FME had connected."""
+    p = InstancePlanner(pinned=[], limit=1, max_hold_s=30, min_hold_s=4)
+    assert p.plan(0, {10: 0}) == ([10], [])
+    assert p.plan(1.5, {}) == ([], [])                                    # keyed down, decoder still starting
+    assert p.plan(3, {20: 3}) == ([20], [10])                             # a waiting channel takes it at once
+    assert p.plan(5, {}) == ([], [])                                      # 20 started 2 s ago: it stays
+    assert p.plan(7.5, {}) == ([], [20])                                  # 4.5 s: retired
+    q = InstancePlanner(pinned=[], limit=1)                               # without min_hold_s: as before
+    assert q.plan(0, {10: 0}) == ([10], []) and q.plan(1, {}) == ([], [10])
+
+
+def test_listen_log_counts_what_connected_decoders_heard():
+    log = ListenLog(no_dmr_after_s=8)
+    log.keyup_started(10)
+    log.tick(10, 0.1, connected=False)                                    # DSD-FME not connected yet
+    assert log.keyup_ended(10) == (False, False)                          # assigned is not listened
+    for n in range(6):                                                    # key-ups of 1.5 s, never DMR
+        log.keyup_started(10)
+        for _ in range(15):
+            log.tick(10, 0.1, connected=True)
+        assert log.keyup_ended(10) == (True, False)
+        assert log.no_dmr(10, syncs=0) == (n == 5)                        # 7.5 s after five, 9 s after six
+    assert not log.no_dmr(10, syncs=50)                                   # it did decode: not "no DMR"
+    log.keyup_started(20)
+    log.tick(20, 0.1, connected=True)
+    log.heard_dmr(20)
+    assert log.keyup_ended(20) == (True, True) and log.keyup_ended(20) == (False, False)
+    log.retired(30, ever_connected=False)
+    log.retired(30, ever_connected=False)
+    log.retired(20, ever_connected=True)
+    assert log.never_connected == {30: 2}
+
+
 def test_the_networks_traffic_channels_come_first():
     """Battery: one pinned control channel, two decoders for the rest. Two carriers of other systems
     are on the air all the time; a call on the network's traffic channel must still be heard."""
@@ -222,7 +256,7 @@ def test_watch_session_decodes_channels_when_they_key_up(tmp_path, watch_cfg):
         assert sess["kind"] == "watch" and sess["status"] == "done", sess
         summ = sess["summary"]
         assert summ["plan"]["pinned"] == [165_300_000] and summ["instances"] == 3
-        rows = client.rows("SELECT c.freq_hz, k.start, k.end, k.decoded FROM keyups k JOIN carriers c ON c.id = k.carrier_id ORDER BY k.start")
+        rows = client.rows("SELECT c.freq_hz, k.start, k.end, k.decoded, k.dmr_heard FROM keyups k JOIN carriers c ON c.id = k.carrier_id ORDER BY k.start")
         by = {}
         for r in rows:
             by.setdefault(int(r["freq_hz"]), []).append(r)
@@ -238,6 +272,11 @@ def test_watch_session_decodes_channels_when_they_key_up(tmp_path, watch_cfg):
         assert carriers["165600000"]["keyups"] == 2 and carriers["165600000"]["syncs"] > 50
         assert carriers["165300000"]["syncs"] > carriers["165600000"]["syncs"]
         assert summ["watch"]["missed"] == 0 and "correlate" in summ
+        # decoded = DMR heard, listened = a connected DSD-FME had the audio; the fake one always prints DMR
+        assert all(r["dmr_heard"] for r in rows), [dict(r) for r in rows]
+        wt = summ["watch"]
+        assert wt["decoded"] == wt["listened"] == wt["keyups"] and wt["no_decoder"] == 0 and wt["never_connected"] == {}, wt
+        assert carriers["165600000"]["decoded"] == carriers["165600000"]["listened"] == 2
         assert summ["watch"]["block_ms_avg"] > 0 and summ["watch"]["block_ms_budget"] == 100.0 and summ["watch"]["overflows"] == 0
         assert client.scalar("SELECT COUNT(*) FROM ingest_runs WHERE source = 'collector'") == 3   # one per carrier, not per key-up
         assert src.closed

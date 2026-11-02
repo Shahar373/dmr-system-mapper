@@ -273,8 +273,10 @@ class LineParser:
         states = ev.payload.setdefault("lsn_states", {})
         for lsn, state in states.items():
             if state not in ("rest", "idle") and isinstance(state, int):
-                # DSD-FME prints "TGT" in Bank lines for group calls too, so the bank cannot tell
-                # radios from talkgroups; only an Individual-addressed record can.
+                # DSD-FME prints "TGT" and "Private or Data Call(s)" in Bank lines for group calls too
+                # (TG 1 in the Cap+ sample), so the bank cannot tell radios from talkgroups; only an
+                # Individual-addressed record of the same id can (preamble, data header, data response).
+                # Ids this parser had not met yet are sorted out by the correlator (identity.talkgroup).
                 kind = "radio" if state in self._individual_targets else "tg"
                 ev.identities.append((kind, state, "lsn_active"))
 
@@ -636,6 +638,8 @@ class LineParser:
             return True   # position without a preceding LRRP record: nothing to attach to
         if m := DATA_MISC_RE.match(s):
             if m.group("rtgt"):
+                # both ends of a data response are radios (or a data gateway), never a talkgroup
+                self._individual_targets.update((int(m.group("rtgt")), int(m.group("rsrc"))))
                 yield self._event("data_response", {"tgt": int(m.group("rtgt")), "src": int(m.group("rsrc")), "text": s[:80]},
                                   [("radio", int(m.group("rsrc")), "data"), ("radio", int(m.group("rtgt")), "data")])
             return True
