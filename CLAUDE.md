@@ -7,11 +7,14 @@
 - **Reference projects are read-only:** dmr-iq-surveyor (MIT), DMR-DECREP-SHAHAR (no licence: re-implement,
   do not copy) and the private P25 mapper. Copy ideas and parser knowledge, never modify them.
 - **No DSP of our own beyond channelisation:** DSD-FME does all DMR decoding. Claude's role through MCP is
-  orchestration and judgement over evidence.
+  orchestration and judgement over evidence. The one exception is `tools/`: standalone research tools for
+  carriers that are not DMR (e.g. `tools/afsk469`), never imported by `dmr_mapper`.
 - **Never hardcode machine-specific values** (Tailscale addresses, usernames, paths, band plans). They go in
-  `config.local.yaml` (git-ignored); `config.example.yaml` is the committed template.
+  `config.local.yaml` (git-ignored); `config.example.yaml` is the committed template. Likewise the SDRTrunk
+  playlist: `sdrtrunk/playlist.local.xml` (git-ignored), template `sdrtrunk/playlist.example.xml`.
 - **Storage discipline:** the collector streams DSD-FME output and writes only structured, aggregated events to
-  SQLite. Raw logs only under a debug flag with size-capped rotation. No IQ or WAV is ever kept.
+  SQLite. Raw logs only under a debug flag with size-capped rotation. No IQ or WAV is ever kept. SDRTrunk event
+  logs and recordings are never committed either (radio ids, LRRP positions).
 - **samples/ are test fixtures.** Everything must be testable offline on them before hardware is involved.
   DSD-FME writes its console to stderr: the surveyor `*_stdout.log` files are empty by design.
 - **Tier II links are never presented as certain.** Every link carries a confidence score and its evidence.

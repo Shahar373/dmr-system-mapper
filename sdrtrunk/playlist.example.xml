@@ -1,0 +1,77 @@
+<playlist version="4">
+  <!--
+    Template for an SDRTrunk playlist of the systems the mapper finds. Copy it to
+    sdrtrunk/playlist.local.xml (git-ignored) and put the real frequencies there: they are a local
+    band plan and never go in the repository. The values below (400.xxx MHz) are placeholders.
+    One channel of each kind: a Tier III / Capacity Max control channel, a Capacity Plus site,
+    a conventional DMR repeater, and a non-DMR carrier recorded as baseband I/Q. See README.md.
+    SDRTrunk drops these comments when it saves the playlist; XML comments must not contain two hyphens in a row.
+  -->
+
+  <!-- Tier III / Capacity Max: one channel per site, on its control channel. "lsn" holds the LCN
+       (one entry per repeater). The LCN plan is network-wide: every site gets the same map. -->
+  <channel name="NETWORK site 1 control" enabled="true" order="1" system="NETWORK" site="1">
+    <decode_configuration type="decodeConfigDMR" ignore_data_calls="false" traffic_channel_pool_size="20" ignore_crc="false" use_compressed_talkgroups="false">
+      <timeslot lsn="1" downlink="400012500" uplink="0"/>
+      <timeslot lsn="2" downlink="400025000" uplink="0"/>
+    </decode_configuration>
+    <source_configuration type="sourceConfigTuner" frequency="400025000" source_type="TUNER"/>
+    <aux_decode_configuration/>
+    <event_log_configuration>
+      <logger>CALL_EVENT</logger>
+      <logger>DECODED_MESSAGE</logger>
+      <logger>TRAFFIC_CALL_EVENT</logger>
+      <logger>TRAFFIC_DECODED_MESSAGE</logger>
+    </event_log_configuration>
+    <record_configuration/>
+    <alias_list_name/>
+  </channel>
+
+  <!-- Capacity Plus: one channel per site, with every repeater frequency of that site so SDRTrunk can
+       hunt the rest channel. Numbering is per site: LCN 1 = LSN 1/2, LCN 2 = LSN 3/4. -->
+  <channel name="CAPPLUS site 1" enabled="false" order="2" system="CAPPLUS" site="1">
+    <decode_configuration type="decodeConfigDMR" ignore_data_calls="false" traffic_channel_pool_size="20" ignore_crc="false" use_compressed_talkgroups="false">
+      <timeslot lsn="1" downlink="400100000" uplink="0"/>
+      <timeslot lsn="2" downlink="400112500" uplink="0"/>
+    </decode_configuration>
+    <source_configuration type="sourceConfigTunerMultipleFrequency" source_type="TUNER_MULTIPLE_FREQUENCIES">
+      <frequency>400100000</frequency>
+      <frequency>400112500</frequency>
+    </source_configuration>
+    <aux_decode_configuration/>
+    <event_log_configuration>
+      <logger>CALL_EVENT</logger>
+      <logger>DECODED_MESSAGE</logger>
+    </event_log_configuration>
+    <record_configuration/>
+    <alias_list_name/>
+  </channel>
+
+  <!-- Conventional (Tier II) repeater: no map. -->
+  <channel name="TIER2 400.200" enabled="false" order="3" system="TIER2" site="400.200">
+    <decode_configuration type="decodeConfigDMR" ignore_data_calls="false" traffic_channel_pool_size="20" ignore_crc="false" use_compressed_talkgroups="false"/>
+    <source_configuration type="sourceConfigTuner" frequency="400200000" source_type="TUNER"/>
+    <aux_decode_configuration/>
+    <event_log_configuration>
+      <logger>CALL_EVENT</logger>
+      <logger>DECODED_MESSAGE</logger>
+    </event_log_configuration>
+    <record_configuration/>
+    <alias_list_name/>
+  </channel>
+
+  <!-- A carrier that is not DMR: NBFM with baseband recording (stereo 16-bit I/Q WAV, about 12 MB a
+       minute), to identify it offline, e.g. with tools/afsk469. Keep it off when not recording. -->
+  <channel name="UNKNOWN 400.300 IQ" enabled="false" order="4" system="UNKNOWN" site="400.300">
+    <decode_configuration type="decodeConfigNBFM"/>
+    <source_configuration type="sourceConfigTuner" frequency="400300000" source_type="TUNER"/>
+    <aux_decode_configuration/>
+    <event_log_configuration>
+      <logger>CALL_EVENT</logger>
+    </event_log_configuration>
+    <record_configuration>
+      <recorder>BASEBAND</recorder>
+    </record_configuration>
+    <alias_list_name/>
+  </channel>
+</playlist>

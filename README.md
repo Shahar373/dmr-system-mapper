@@ -48,6 +48,10 @@ investigation only.
 - [config.example.yaml](config.example.yaml): all settings with comments. Copy to
   `config.local.yaml` (git-ignored) for machine-specific values; never commit Tailscale addresses,
   device serials or paths.
+- [sdrtrunk/README.md](sdrtrunk/README.md): SDRTrunk playlists for the systems the mapper finds (the LCN
+  map, Capacity Plus sites, baseband recording of non-DMR carriers); the real playlist stays local.
+- [tools/afsk469/README.md](tools/afsk469/README.md): a standalone decoder for the 469.1 MHz telemetry link
+  (analogue AFSK, not DMR) and what is known about its protocol.
 
 ## Phases
 
