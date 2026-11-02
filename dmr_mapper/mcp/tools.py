@@ -304,7 +304,7 @@ class MapperTools:
 
     def list_survey_hits(self, band: str | None = None, run_id: int | None = None, min_snr_db: float | None = None,
                          limit: int = 200) -> dict[str, Any]:
-        from ..collector.survey import latest_hits
+        from ..collector.survey import plan_window_s, recent_hits
 
         with self.store() as s:
             if run_id is not None:
@@ -314,7 +314,7 @@ class MapperTools:
                 hits = [{**dict(h), "band": run["band"], "run_started": run["started"]} for h in
                         s.rows("SELECT * FROM survey_hits WHERE run_id = ? ORDER BY freq_hz", (int(run_id),))]
             else:
-                hits = latest_hits(s)
+                hits = recent_hits(s, plan_window_s(self.cfg))
             known = {int(r["freq_hz"]): r["variant"] for r in s.carriers()}
         out = []
         for h in hits:
@@ -326,7 +326,7 @@ class MapperTools:
             variant = next((v for k, v in known.items() if abs(k - f) <= self.tolerance_hz), None)
             out.append({"freq_hz": f, "mhz": round(f / 1e6, 5), "band": h["band"], "run_id": h["run_id"], "at": self.iso(h["run_started"]),
                         "snr_db": h["snr_db"], "p95_snr_db": h["p95_snr_db"], "occupancy_pct": h["occupancy_pct"], "width_hz": h["width_hz"],
-                        "class": h["class"], "known_as": variant})
+                        "class": h["class"], "known_as": variant, "heard_in": h.get("heard_in", 1), "sweeps": h.get("sweeps", 1)})
         return {"count": len(out), "hits": out[:max(1, int(limit))], "truncated": len(out) > int(limit)}
 
     # -- systems and links ------------------------------------------------------------------------
@@ -426,7 +426,8 @@ class MapperTools:
     # -- sessions ---------------------------------------------------------------------------------
     def prepare_session(self, kind: str, minutes: float | None = None, bands: list[str] | None = None,
                         start: float | int | None = None, stop: float | int | None = None, freqs: list[float | int] | None = None,
-                        center: float | int | None = None, then_decode: bool = False) -> tuple[str, dict[str, Any], str]:
+                        center: float | int | None = None, then_decode: bool = False, dwell_s: float | None = None,
+                        sweeps: int | None = None) -> tuple[str, dict[str, Any], str]:
         """Check that a session could start now and build its command; raises ValueError if not."""
         if kind not in SESSION_KINDS:
             raise ValueError(f"kind must be one of {sorted(SESSION_KINDS)}")
@@ -447,6 +448,12 @@ class MapperTools:
                 lo, hi = to_hz(start), to_hz(stop)
                 band_for_range(cfg_bands, lo, hi)          # raises when outside the band plan
                 params["range"] = {"start_hz": lo, "stop_hz": hi}
+            if dwell_s is not None:
+                params["dwell_s"] = float(dwell_s)
+            if sweeps is not None:
+                params["sweeps"] = int(sweeps)
+            from ..collector.survey import check_survey_params
+            check_survey_params(params, self.cfg)          # raises for a dwell the hit test cannot honour
             if then_decode:
                 params["then_decode"] = True
                 params["total_budget_s"] = params["budget_s"]

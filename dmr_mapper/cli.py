@@ -322,9 +322,26 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
 
 
 def cmd_survey(args: argparse.Namespace) -> int:
+    from .collector.survey import check_survey_params, sweep_seconds
+
     params: dict = {}
     if args.band:
         params["bands"] = args.band
+    if args.dwell is not None:
+        params["dwell_s"] = float(args.dwell)
+    if args.sweeps is not None:
+        params["sweeps"] = int(args.sweeps)
+    cfg = load_config(args.config)
+    try:
+        dwell, sweeps = check_survey_params(params, cfg)
+    except ValueError as exc:
+        print(f"survey: {exc}", file=sys.stderr)
+        return 2
+    bands = [b for b in (cfg.get("survey", {}) or {}).get("bands", []) or [] if not args.band or b.get("name") in args.band]
+    sdr = cfg.get("sdr", {}) or {}
+    one = sweep_seconds(bands, float(sdr.get("sample_rate_hz", 2_000_000)), float(sdr.get("usable_fraction", 0.8)), dwell)
+    print(f"survey: {sweeps} sweep(s) of {', '.join(str(b.get('name')) for b in bands) or 'no band'} at {dwell:g} s per step,"
+          f" about {one / 60:.1f} min each", file=sys.stderr)
     if args.then_decode:
         params["then_decode"] = True
         if args.minutes:
@@ -678,12 +695,16 @@ def build_parser() -> argparse.ArgumentParser:
     sv.add_argument("--band", action="append", help="band name from config (repeatable; default: all)")
     sv.add_argument("--minutes", type=float, help="session budget")
     sv.add_argument("--then-decode", action="store_true", help="decode right after the survey; --minutes is then the total for both")
+    sv.add_argument("--dwell", type=float, metavar="S", help="seconds per tuner step for this session only (default survey.dwell_s;"
+                    " at most 11 with the default 1 s segments and 9 dB gate)")
+    sv.add_argument("--sweeps", type=int, metavar="N", help="sweep the bands N times in this session (default 1); a decode plans"
+                    " from every sweep of the last survey.plan_window_minutes, so N short sweeps catch more than one long")
     sv.add_argument("--wait", action="store_true", default=True, help="follow the session until it ends (default)")
     sv.add_argument("--no-wait", dest="wait", action="store_false")
     sv.set_defaults(func=cmd_survey)
 
-    dc = sub.add_parser("decode", help="start a decode session (latest survey hits, or the given frequencies)")
-    dc.add_argument("freq", nargs="*", help="frequencies in Hz (default: plan from the latest survey)")
+    dc = sub.add_parser("decode", help="start a decode session (recent survey hits, or the given frequencies)")
+    dc.add_argument("freq", nargs="*", help="frequencies in Hz (default: plan from the recent sweeps, survey.plan_window_minutes)")
     dc.add_argument("--minutes", type=float, help="session budget")
     dc.add_argument("--instances", type=int, help="DSD-FME processes at once (default from power state)")
     dc.add_argument("--wait", action="store_true", default=True)

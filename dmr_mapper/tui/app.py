@@ -23,7 +23,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane, Tree
 
 from ..collector import state as st
-from ..collector.survey import latest_hits
+from ..collector.survey import plan_window_s, recent_hits
 from ..correlate.names import display, set_name
 from ..db import Store
 
@@ -83,7 +83,7 @@ class StatusBar(Static):
             el, bu = pr.get("elapsed_s"), pr.get("budget_s")
             tail = f"  {el}/{bu} s" if el is not None and bu else ""
             if s.mode == "survey":
-                line2 = f"survey #{s.session_id}: {pr.get('band', '')} step {pr.get('step', '?')}/{pr.get('steps', '?')} at {_mhz(pr.get('center_hz'))} MHz, {pr.get('hits', 0)} hits so far{tail}"
+                line2 = f"survey #{s.session_id}: {('sweep ' + str(pr['sweep']) + '/' + str(pr['sweeps']) + ', ') if (pr.get('sweeps') or 1) > 1 else ''}{pr.get('band', '')} step {pr.get('step', '?')}/{pr.get('steps', '?')} at {_mhz(pr.get('center_hz'))} MHz, {pr.get('hits', 0)} hits so far{tail}"
             elif s.mode == "watch":
                 mark = {"pinned": "[b]CC[/]", "decoding": "[green]dec[/]", "waiting": "[yellow]wait[/]"}
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} {mark.get(c.get('state'), '')} {c.get('snr_db') if c.get('snr_db') is not None else '?'} dB"
@@ -166,7 +166,7 @@ class MapperApp(App[None]):
         t = self.query_one("#carriers", DataTable)
         t.add_columns("MHz", "variant", "conf", "CC", "site", "system", "last seen", "decoded s", "bursts")
         t = self.query_one("#hits", DataTable)
-        t.add_columns("MHz", "band", "SNR dB", "p95", "occ %", "width", "class", "run")
+        t.add_columns("MHz", "band", "SNR dB", "p95", "occ %", "width", "class", "heard")
         t = self.query_one("#sessions", DataTable)
         t.add_columns("#", "kind", "status", "by", "budget", "started", "elapsed", "summary")
         self.refresh_all()
@@ -209,11 +209,11 @@ class MapperApp(App[None]):
     def _refresh_hits(self) -> None:
         assert self.store is not None
         t = self.query_one("#hits", DataTable)
-        hits = latest_hits(self.store)
+        hits = recent_hits(self.store, plan_window_s(self.cfg))
         self._fill(t, [(
             _mhz(h["freq_hz"]), h["band"], f"{h['snr_db']:.1f}" if h["snr_db"] is not None else "-",
             f"{h['p95_snr_db']:.1f}" if h["p95_snr_db"] is not None else "-", f"{h['occupancy_pct']:.0f}" if h["occupancy_pct"] is not None else "-",
-            f"{h['width_hz']:.0f}" if h["width_hz"] else "-", h["class"] or "-", _ago(h["run_started"])) for h in hits],
+            f"{h['width_hz']:.0f}" if h["width_hz"] else "-", h["class"] or "-", f"{h.get('heard_in', 1)}/{h.get('sweeps', 1)}, {_ago(h['run_started'])}") for h in hits],
             [str(h["freq_hz"]) for h in hits])
 
     def _refresh_systems(self) -> None:

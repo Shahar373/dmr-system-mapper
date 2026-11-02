@@ -39,11 +39,15 @@ survey:
   bands:
     - {name: vhf-high, start_hz: 160000000, stop_hz: 174000000, raster_hz: 12500}
     - {name: uhf,      start_hz: 400000000, stop_hz: 470000000, raster_hz: 12500}
-  dwell_s: 3                   # seconds per tuner step
+  dwell_s: 3                   # seconds per tuner step (about 3 min per sweep of the two bands); per session:
+                               # mapper survey --dwell S. At most 11 s with segment_s 1 and a 9 dB gate: the p95
+                               # test then still sees a carrier 3 dB over the gate that transmits for one segment
   segment_s: 1                 # PSD integration segment inside a dwell
   snr_threshold_db: 9          # p95 channel SNR gate (same meaning as the surveyor)
   raster_tolerance_hz: 2500    # how far from the 12.5 kHz raster a hit may sit
   cycle_minutes: 30            # full survey repeat interval
+  plan_window_minutes: 180     # a decode plans from every sweep of a band up to this long before its newest one,
+                               # merged (mapper survey --sweeps N): a repeater quiet in one sweep is still decoded
   same_site_max_span_hz: 5000000   # Cap+ carriers of one site are assumed within this span
   tier3_bandplans: []          # optional: [{name, base_hz, step_hz, lpcn_offset}] for LPCN->frequency
 

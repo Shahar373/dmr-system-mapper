@@ -194,8 +194,9 @@ def build_server(cfg: dict[str, Any], db_path: str | Path | None = None) -> tupl
         return Elicit(f"Claude asks to use the receiver on the Pi: {what}. Approve?", Approval)
 
     def ask_scan(ctx: Context, band: str | None = None, start: float | None = None, stop: float | None = None,
-                 minutes: float | None = None, then_decode: bool = False) -> Any:
-        return _ask(ctx, "survey", minutes=minutes, bands=[band] if band else None, start=start, stop=stop, then_decode=then_decode)
+                 minutes: float | None = None, then_decode: bool = False, dwell_s: float | None = None, sweeps: int | None = None) -> Any:
+        return _ask(ctx, "survey", minutes=minutes, bands=[band] if band else None, start=start, stop=stop, then_decode=then_decode,
+                    dwell_s=dwell_s, sweeps=sweeps)
 
     def ask_decode(ctx: Context, freqs: list[float] | None = None, minutes: float | None = None) -> Any:
         return _ask(ctx, "decode", minutes=minutes, freqs=freqs)
@@ -215,16 +216,23 @@ def build_server(cfg: dict[str, Any], db_path: str | Path | None = None) -> tupl
                         start: Freq | None = None, stop: Freq | None = None,
                         minutes: Annotated[float | None, Field(description="session budget (default mcp.default_session_minutes)")] = None,
                         then_decode: Annotated[bool, Field(description="decode what was found in the same budget")] = False,
+                        dwell_s: Annotated[float | None, Field(description="seconds per tuner step, this session only (default survey.dwell_s, 3;"
+                                                                     " at most 11 with the default gate)")] = None,
+                        sweeps: Annotated[int | None, Field(description="sweep the bands this many times (default 1)")] = None,
                         answer: Annotated[ElicitationResult[Approval], Resolve(ask_scan)] = None) -> dict[str, Any]:
-        """Survey a band (or start..stop inside a configured band) for carriers. Asks the operator first."""
-        return await _session(answer, "survey", minutes=minutes, bands=[band] if band else None, start=start, stop=stop, then_decode=then_decode)
+        """Survey a band (or start..stop inside a configured band) for carriers. Asks the operator first.
+        A sweep of VHF 160-174 and UHF 400-470 MHz takes about 3 min at 3 s per step. A decode plans from
+        every sweep of the last survey.plan_window_minutes (180), so several short sweeps catch an
+        intermittent repeater more often than one long one."""
+        return await _session(answer, "survey", minutes=minutes, bands=[band] if band else None, start=start, stop=stop,
+                              then_decode=then_decode, dwell_s=dwell_s, sweeps=sweeps)
 
     @mcp.tool(annotations=radio)
-    async def decode_carriers(freqs: Annotated[list[float] | None, Field(description="carriers to decode; none: plan from the latest survey")] = None,
+    async def decode_carriers(freqs: Annotated[list[float] | None, Field(description="carriers to decode; none: plan from the recent surveys")] = None,
                               minutes: float | None = None,
                               answer: Annotated[ElicitationResult[Approval], Resolve(ask_decode)] = None) -> dict[str, Any]:
         """Run DSD-FME on carriers (several at once when they fit in one slice). With freqs it listens for
-        the whole `minutes`, shared among the slices; without, it plans one round from the latest survey.
+        the whole `minutes`, shared among the slices; without, it plans rounds from the recent surveys.
         Asks the operator first. Then get_fingerprint shows what was heard."""
         return await _session(answer, "decode", minutes=minutes, freqs=freqs)
 

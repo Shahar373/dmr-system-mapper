@@ -160,21 +160,110 @@ def record(store: Store, band: str, started: int, hits: list[SurveyHit], device:
     return run_id
 
 
-def latest_hits(store: Store, max_age_s: int | None = None) -> list[dict[str, Any]]:
-    """Hits of the most recent run per band (optionally only runs younger than ``max_age_s``)."""
+MAX_SWEEPS = 20
+
+
+def max_dwell_s(cfg: dict[str, Any]) -> float:
+    """The longest dwell per step at which a carrier 3 dB over the gate, transmitting during one
+    segment only, still clears the gate.
+
+    The hit test is the 95th percentile of the per-segment channel power (``np.percentile``,
+    linear interpolation): the more segments a dwell holds, the less one loud segment weighs, and
+    from 21 segments on it does not count at all. With the defaults (1 s segments, 9 dB gate) this
+    is 11 s; a longer dwell would lose short transmissions of weak carriers."""
+    scfg = cfg.get("survey", {}) or {}
+    segment = float(scfg.get("segment_s", 1))
+    thr = float(scfg.get("snr_threshold_db", 9))
+    loud = 10 ** ((thr + 3) / 10)
+    n = 1
+    while n < 200:
+        v = np.ones(n + 1)
+        v[0] = loud
+        if 10 * np.log10(np.percentile(v, 95)) < thr:
+            break
+        n += 1
+    return n * segment
+
+
+def check_survey_params(params: dict[str, Any], cfg: dict[str, Any]) -> tuple[float, int]:
+    """(dwell per step, number of sweeps) a survey session will use; raises ValueError for values
+    the hit test cannot honour. ``dwell_s`` in the params overrides ``survey.dwell_s`` for that
+    session only."""
+    scfg = cfg.get("survey", {}) or {}
+    dwell = params.get("dwell_s")
+    if dwell is None:
+        dwell = float(scfg.get("dwell_s", 3))
+    else:
+        dwell = float(dwell)
+        segment = float(scfg.get("segment_s", 1))
+        top = max_dwell_s(cfg)
+        if not segment <= dwell <= top:
+            raise ValueError(f"dwell must be between {segment:g} and {top:g} s per step: longer, the p95 test over"
+                             f" {segment:g} s segments loses short transmissions of weak carriers")
+    sweeps = 1 if params.get("sweeps") is None else int(params["sweeps"])
+    if not 1 <= sweeps <= MAX_SWEEPS:
+        raise ValueError(f"sweeps must be between 1 and {MAX_SWEEPS}")
+    return dwell, sweeps
+
+
+def sweep_seconds(bands: list[dict[str, Any]], sample_rate: float, usable_fraction: float, dwell_s: float) -> float:
+    """Roughly how long one sweep of these bands takes (dwell plus the settle read after a retune)."""
+    steps = sum(len(step_centres(int(b["start_hz"]), int(b["stop_hz"]), sample_rate, usable_fraction)) for b in bands)
+    return steps * (dwell_s + 0.1)
+
+
+def recent_hits(store: Store, window_s: int, max_age_s: int | None = None) -> list[dict[str, Any]]:
+    """Hits of the recent sweeps, merged per frequency.
+
+    Per band (a configured band, or a start..stop range of one, which is recorded under its own
+    name) the newest run counts (if younger than ``max_age_s``) and with it every run of that band
+    started up to ``window_s`` before it. A carrier heard in any of them is kept, with the values of
+    the sweep that heard it strongest, ``heard_in`` (how many of those sweeps heard it), ``sweeps``
+    (how many there were) and ``run_started`` (the last sweep that heard it). Several short sweeps
+    therefore add up: a conventional repeater quiet during one sweep is still planned for when an
+    earlier one heard it. ``window_s = 0`` is the newest run per band only."""
     runs = store.rows("SELECT id, band, started FROM survey_runs ORDER BY started DESC, id DESC")
-    seen_band: set[str] = set()
-    out: list[dict[str, Any]] = []
+    newest: dict[str, int] = {}
+    chosen: dict[str, list[dict[str, Any]]] = {}
     now = int(time.time())
     for r in runs:
-        if r["band"] in seen_band:
-            continue
-        if max_age_s is not None and now - int(r["started"]) > max_age_s:
-            continue
-        seen_band.add(r["band"])
-        for h in store.rows("SELECT * FROM survey_hits WHERE run_id = ? ORDER BY freq_hz", (r["id"],)):
-            d = dict(h)
-            d["band"] = r["band"]
-            d["run_started"] = r["started"]
-            out.append(d)
-    return sorted(out, key=lambda d: d["freq_hz"])
+        band = str(r["band"])
+        if band not in newest:
+            if max_age_s is not None and now - int(r["started"]) > max_age_s:
+                continue
+            newest[band] = int(r["started"])
+            chosen[band] = [dict(r)]
+        elif window_s > 0 and newest[band] - int(r["started"]) <= window_s:
+            chosen[band].append(dict(r))
+    merged: dict[int, dict[str, Any]] = {}
+    for band, band_runs in chosen.items():
+        heard: dict[int, int] = {}
+        for run in band_runs:
+            for h in store.rows("SELECT * FROM survey_hits WHERE run_id = ? ORDER BY freq_hz", (run["id"],)):
+                d = dict(h)
+                f = int(d["freq_hz"])
+                heard[f] = heard.get(f, 0) + 1
+                d["band"] = band
+                d["run_started"] = int(run["started"])
+                prev = merged.get(f)
+                if prev is None:
+                    merged[f] = {**d, "heard_in": 0, "sweeps": 0}
+                    continue
+                last = max(int(prev["run_started"]), int(run["started"]))
+                if (d["snr_db"] or -999) > (prev["snr_db"] or -999):
+                    merged[f] = {**d, "heard_in": prev["heard_in"], "sweeps": prev["sweeps"]}
+                merged[f]["run_started"] = last
+        for f, n in heard.items():
+            merged[f]["heard_in"] += n
+            merged[f]["sweeps"] += len(band_runs)
+    return [merged[f] for f in sorted(merged)]
+
+
+def latest_hits(store: Store, max_age_s: int | None = None) -> list[dict[str, Any]]:
+    """Hits of the most recent run per band (optionally only runs younger than ``max_age_s``)."""
+    return recent_hits(store, 0, max_age_s)
+
+
+def plan_window_s(cfg: dict[str, Any]) -> int:
+    """How far back, before a band's newest sweep, decode planning and the hit lists look."""
+    return int(float((cfg.get("survey", {}) or {}).get("plan_window_minutes", 180)) * 60)

@@ -37,7 +37,7 @@ from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
-from .survey import latest_hits, record, sweep
+from .survey import check_survey_params, plan_window_s, recent_hits, record, sweep, sweep_seconds
 from .watch import InstancePlanner, KeyupDetector, ListenLog, plan_watch, watch_cfg, watch_instances
 
 
@@ -245,6 +245,11 @@ class Daemon:
                 return False, f"a {self.session_kind} session is already running (#{self.session_id}); stop it first"
             if kind in ("start_decode", "start_watch") and find_dsd_fme(self.cfg) is None:
                 return False, "dsd-fme not found (decode.dsd_fme_bin)"
+            if kind == "start_survey":
+                try:      # a dwell the hit test cannot honour is a refusal, before the receiver is touched
+                    check_survey_params(params, self.cfg)
+                except (TypeError, ValueError) as exc:
+                    return False, str(exc)
             self.sdr = self._probe()
             self._last_probe = self._last_full_probe = time.monotonic()
             if self.sdr.status != "present":
@@ -447,32 +452,50 @@ class Daemon:
             bands = [band_for_range(bands, int(params["range"]["start_hz"]), int(params["range"]["stop_hz"]))]
         if not bands:
             raise ValueError("no survey bands configured (survey.bands)")
-        summary["bands"] = {}
-        scfg = dict(self.cfg.get("survey", {}) or {})
-        for band in bands:
+        dwell, sweeps = check_survey_params(params, self.cfg)
+        scfg = {**(self.cfg.get("survey", {}) or {}), "dwell_s": dwell}
+        cfg = {**self.cfg, "survey": scfg}           # this session's dwell; the configured one is untouched
+        usable = float((self.cfg.get("sdr", {}) or {}).get("usable_fraction", 0.8))
+        summary.update(dwell_s=dwell, sweeps_planned=sweeps,
+                       sweep_s_estimate=round(sweep_seconds(bands, source.sample_rate, usable, dwell)), bands={}, sweeps=[])
+        heard: set[int] = set()
+        for n in range(1, sweeps + 1):
             self._check(t0, budget_s)
-            started = int(time.time())
+            sweep_t0 = time.monotonic()
+            this: dict[str, int] = {}
+            for band in bands:
+                self._check(t0, budget_s)
+                started = int(time.time())
 
-            def progress(p: dict[str, Any]) -> None:
-                self._set_progress(phase="sweeping", elapsed_s=int(time.monotonic() - t0), budget_s=budget_s, **p, **self._gps_progress())
-                if time.monotonic() - self._last_track_flush >= 30:
-                    self._session_track += self._flush_track(store, self.session_id or 0)
+                def progress(p: dict[str, Any]) -> None:
+                    self._set_progress(phase="sweeping", sweep=n, sweeps=sweeps, elapsed_s=int(time.monotonic() - t0), budget_s=budget_s,
+                                       **p, **self._gps_progress())
+                    if time.monotonic() - self._last_track_flush >= 30:
+                        self._session_track += self._flush_track(store, self.session_id or 0)
 
-            def here() -> tuple[float, float] | None:
-                f = self.gps.fix()
-                return (f.lat, f.lon) if f else None
+                def here() -> tuple[float, float] | None:
+                    f = self.gps.fix()
+                    return (f.lat, f.lon) if f else None
 
-            def stop() -> bool:
-                try:
-                    self._check(t0, budget_s)
-                except SessionStop:
-                    return True
-                return False
+                def stop() -> bool:
+                    try:
+                        self._check(t0, budget_s)
+                    except SessionStop:
+                        return True
+                    return False
 
-            hits = sweep(source, band, self.cfg, stop=stop, progress=progress, position=here)
-            run_id = record(store, str(band.get("name")), started, hits, source.describe(), {k: v for k, v in scfg.items() if k != "bands"})
-            summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits), "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
-            self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
+                hits = sweep(source, band, cfg, stop=stop, progress=progress, position=here)
+                settings = {k: v for k, v in scfg.items() if k != "bands"}
+                if sweeps > 1:
+                    settings["sweep"] = f"{n}/{sweeps}"
+                run_id = record(store, str(band.get("name")), started, hits, source.describe(), settings)
+                heard.update(h.freq_hz for h in hits)
+                this[str(band.get("name"))] = len(hits)
+                summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits),
+                                                           "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
+                self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
+            summary["sweeps"].append({"sweep": n, "seconds": round(time.monotonic() - sweep_t0), "hits": this})
+            summary["distinct_hits"] = len(heard)
 
     # -- decode ------------------------------------------------------------------------------------
     def _decode(self, store: Store, source: Any, params: dict[str, Any], budget_s: int, t0: float, summary: dict[str, Any]) -> None:
@@ -487,7 +510,7 @@ class Daemon:
         rounds = 0
         while True:
             self._check(t0, budget_s)
-            hits = latest_hits(store, max_age_s=7 * 86400)
+            hits = recent_hits(store, plan_window_s(self.cfg), max_age_s=7 * 86400)
             targets = targets_from_store(store, self.cfg, hits, only_freqs=only or None)
             if not targets:
                 summary["note"] = "no carriers to decode: run a survey first"

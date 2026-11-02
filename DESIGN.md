@@ -89,8 +89,19 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
 - **Survey**: steps of `sample_rate × usable_fraction` (1.6 MHz at 2 MS/s), Welch PSD per
   `segment_s`, channel power on the raster, noise floor = median channel, hit when the 95th
   percentile SNR clears `snr_threshold_db`; neighbours of a strong carrier are suppressed.
-  Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`).
-- **Decode**: the scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
+  Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`). A session may
+  sweep its bands several times (`sweeps`, one `survey_runs` row per band and sweep) and use its own
+  `dwell_s` (`mapper survey --sweeps N --dwell S`, MCP `scan_band`), checked by `check_survey_params`:
+  between `segment_s` and `max_dwell_s`, the longest dwell at which a carrier 3 dB over the gate that
+  transmits during one segment still clears the p95 gate (`np.percentile` interpolates linearly, so one
+  loud segment weighs less the more there are, and nothing from 21 on): 11 s with the defaults.
+  Seconds per step and sweep: dwell 3 s: 12 dB / 20 dB one-second burst read as 11.6 / 19.5 dB, sweep of
+  both default bands (53 steps) 2.7 min; 8 s: 10.3 / 18.2 dB, 7.2 min; 12 s: 8.9 (lost) / 16.6 dB, 10.7 min.
+- **Decode**: targets are the hits of the recent sweeps (`recent_hits`: per band name, the newest run
+  younger than 7 days and every run up to `survey.plan_window_minutes` (180) before it, merged per
+  frequency with the values of the strongest sweep, `heard_in` and `sweeps`) plus the carriers seen in
+  30 days. Before, only the newest run per band counted, so a second sweep hid what the first had heard.
+  The scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
   variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
   Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
   FFT channelizer (overlap-save, sample_rate/D per channel: 80 kHz at 2 MS/s, 7.5 kHz low-pass, discriminator, rational resampling to 48 kHz int16,
@@ -703,8 +714,8 @@ known carrier within `raster_tolerance_hz`. Times are ISO 8601 in `timezone`.
 | `propose_link` | `a_freq, b_freq, kind, confidence (0..1], note` | manual evidence with `source = mcp` (replaces Claude's earlier one for that link), rescored link |
 | `withdraw_proposal` | `a_freq, b_freq, kind?` | Claude's evidence removed, links rescored (deleted when nothing is left) |
 | `correlate_now` | – | through the daemon's `correlate` command when it runs, else in-process: the report |
-| `scan_band` | `band?, start?, stop?, minutes?, then_decode = false` | request: `{request_id, status, what, session_id?}`. `start..stop` must lie inside one configured band (`band_for_range`) |
-| `decode_carriers` | `freqs?, minutes?` | request (none: plan from the latest survey) |
+| `scan_band` | `band?, start?, stop?, minutes?, then_decode = false, dwell_s?, sweeps?` | request: `{request_id, status, what, session_id?}`. `start..stop` must lie inside one configured band (`band_for_range`) |
+| `decode_carriers` | `freqs?, minutes?` | request (none: plan from the recent sweeps) |
 | `watch_slice` | `freqs?, center?, minutes?` | request |
 | `stop_session` | – | the `stop` command's result |
 
@@ -936,6 +947,14 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   "no DMR" and is revisited rarely). Watching is the way to hear it.
 - **Tier III channel numbering** without `Chan_Freq` needs a band plan (`survey.tier3_bandplans`)
   to convert LPCN to frequency; absent that, LPCN is stored and the link stays at `possible`.
+- **Intermittent carriers and the survey** (2026-11-02). A survey step listens 3 s, so a conventional
+  repeater that keys up once a minute for about 5 s (with its hang time) is caught by one sweep about
+  1 time in 8, by an 8 s step about 1 in 5, and by three 3 s sweeps about 1 in 3 (Poisson estimate,
+  1 - exp(-n (dwell + 5 s) / 60 s)). Several sweeps merged for planning beat one long dwell, which is
+  why `--sweeps` exists and the planner merges the recent sweeps. Neither catches a repeater that is
+  used a few times an hour: a watch session on its slice does. The window ignores where the receiver
+  was: after a drive, hits from 2-3 hours ago at another place are still planned for (and score low
+  once decoded without DMR); `survey.plan_window_minutes` shortens it.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded
   at that moment is simply not corroborated; behavioural evidence accumulates slowly and that is
   expected. A wideband channelizer is a later optimisation.

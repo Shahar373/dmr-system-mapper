@@ -149,7 +149,9 @@ mapper daemon                      # foreground; systemd runs this in Phase 3b
 mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
-mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the latest survey
+mapper survey --sweeps 3 --then-decode --minutes 50   # three sweeps, then decode what any of them heard
+mapper survey --dwell 8                            # 8 s per step for this session only (about 7 min per sweep)
+mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the recent sweeps
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions
 mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
@@ -163,7 +165,15 @@ mapper export --all              # map.html, map.json, map.graphml, systems.txt 
 mapper snapshot                  # consistent copy of the database in var/snapshots/ (nightly by timer)
 ```
 
-A decode session plans from the latest survey: carriers never decoded, strong, stale, or of a
+A decode session plans from the recent sweeps: every sweep of a band up to `survey.plan_window_minutes`
+(180) before its newest one, merged per frequency, so a conventional repeater that was quiet during the
+last sweep is still decoded if an earlier one heard it. Several short sweeps (`--sweeps N`) therefore
+catch an intermittent carrier more often than one long one: each sweep is another chance, and a
+transmission already under way when a step starts counts too. `--dwell S` changes the seconds per step for
+one session (default `survey.dwell_s`, 3: about 3 min per sweep of VHF 160-174 and UHF 400-470 MHz); it is
+refused above 11 s with the default 1 s segments and 9 dB gate, because the p95 test over more segments
+loses a weak carrier heard in one of them. The Survey tab shows in how many of the recent sweeps each hit
+was heard. Carriers never decoded, strong, stale, or of a
 variant that announces its identity come first, and carriers that look like the same Capacity Plus
 site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double dwell, because that is what
 produces rest-hop evidence. After a decode session the correlator runs. Closing the console never

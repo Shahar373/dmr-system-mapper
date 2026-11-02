@@ -167,6 +167,10 @@ def describe_request(kind: str, params: dict[str, Any]) -> str:
         bits.append(", ".join(f"{int(f) / 1e6:.4f}" for f in params["freqs"]) + " MHz")
     if params.get("center_hz"):
         bits.append(f"centre {int(params['center_hz']) / 1e6:.4f} MHz")
+    if params.get("sweeps") and int(params["sweeps"]) > 1:
+        bits.append(f"{int(params['sweeps'])} sweeps")
+    if params.get("dwell_s") is not None:
+        bits.append(f"{float(params['dwell_s']):g} s per step")
     if params.get("then_decode"):
         what = "survey, then decode,"
     if params.get("budget_s"):
