@@ -32,6 +32,9 @@ def pattern_of(text: str) -> str:
     return _DIGITS.sub("#", text)[:100]
 
 
+IDENTITY_COUNT_KEYS = {"radio": "radios", "tg": "talkgroups"}
+
+
 @dataclass
 class IngestStats:
     source: str
@@ -60,6 +63,11 @@ class IngestStats:
     skipped: bool = False
     note: str = ""
 
+    def identity_counts(self) -> dict[str, int]:
+        """Distinct values per kind, keyed ``radios`` / ``talkgroups``: never ``radio``, which MCP
+        reads as a radio id and turned into a pseudonym (a count of 1 looked like one shared radio)."""
+        return {IDENTITY_COUNT_KEYS.get(k, k): v for k, v in self.identities.items()}
+
     @property
     def untested_kinds(self) -> list[str]:
         return sorted(k for k in self.structural if k in UNTESTED_ON_AIR)
@@ -71,7 +79,7 @@ class IngestStats:
             "first_ts": self.first_ts, "last_ts": self.last_ts,
             "bursts": dict(self.bursts), "burst_kinds": dict(self.burst_kinds), "cc_histogram": dict(self.cc_histogram),
             "structural": dict(self.structural), "stored_events": dict(self.stored_events), "quality": dict(self.quality),
-            "no_sync": self.no_sync, "rest_transitions": self.rest_transitions, "identities": dict(self.identities),
+            "no_sync": self.no_sync, "rest_transitions": self.rest_transitions, "identities": self.identity_counts(),
             "unrecognized": {k: {"count": c, "example": e} for k, (c, e) in self.unrecognized.items()},
             "csbk_opcodes": dict(self.csbk_opcodes),
             "meta": self.meta, "variant": self.variant, "variant_confidence": self.variant_confidence,
@@ -188,9 +196,10 @@ class Aggregator:
             self._inc(ev.ts, "no_sync")
             return
         if isinstance(ev, Quality):
+            # line-level errors (a corrupt LC, an ERR line, an SLCO that failed its CRC) stay in the run's
+            # quality counters: observations.crc_err counts bursts, so it can never exceed bursts
+            # (456.85 MHz, 2026-10-31: 24,007 "errors" for 23,997 bursts when both were added up)
             st.quality[ev.counter] += 1
-            if ev.counter in ("crc_err", "slco_crc"):
-                self._inc(ev.ts, "crc_err")
             return
         if isinstance(ev, Meta):
             st.meta.setdefault(ev.key, ev.value)

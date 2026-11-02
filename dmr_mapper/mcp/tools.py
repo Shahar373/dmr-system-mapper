@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import secrets
 import time
 from datetime import datetime
@@ -35,6 +36,22 @@ FINISHED = ("done", "stopped", "failed")
 RADIO_KEYS = {"src", "radio", "source_id", "ip"}
 # event kinds whose target is a radio too (data to or from one radio, its position reports)
 PRIVATE_KINDS = {"lrrp", "data_header", "data_response", "ip_map"}
+
+
+def _legacy_identity_counts(summary: dict[str, Any]) -> dict[str, Any]:
+    """Summaries stored before 2026-11 count identities per carrier as ``{"radio": n, "tg": m}``;
+    ``radio`` is a radio-id key for ``redact``, which made the count a pseudonym (the same "radio" on
+    every carrier with as many radios). Renamed as new summaries have them."""
+    carriers = summary.get("carriers")
+    if not isinstance(carriers, dict):
+        return summary
+    fixed = {}
+    for f, c in carriers.items():
+        ids = c.get("identities") if isinstance(c, dict) else None
+        if isinstance(ids, dict) and any(k in ids for k in ("radio", "tg")):
+            c = {**c, "identities": {{"radio": "radios", "tg": "talkgroups"}.get(k, k): v for k, v in ids.items()}}
+        fixed[f] = c
+    return {**summary, "carriers": fixed}
 
 
 def to_hz(value: float | int | str) -> int:
@@ -74,21 +91,31 @@ class MapperTools:
         return "radio-" + hashlib.sha256(self._salt + str(value).encode()).hexdigest()[:6]
 
     def redact(self, obj: Any, radio_list: bool = False, private: bool = False) -> Any:
-        """Radio ids in event payloads and evidence details become pseudonyms."""
+        """Radio ids in event payloads and evidence details become pseudonyms, also where a text
+        field of the same record repeats them (``data_response.text`` is DSD-FME's line, ids and all)."""
         if isinstance(obj, dict):
             private = private or obj.get("group") is False or obj.get("kind") == "private" or str(obj.get("addressing", "")).lower().startswith("ind")
+            ids = {v for k, v in obj.items() if (k in RADIO_KEYS or (private and k in ("tgt", "dst")))
+                   and isinstance(v, int) and not isinstance(v, bool) and v > 0}
             out = {}
             for k, v in obj.items():
                 if k in RADIO_KEYS or (private and k in ("tgt", "dst")):
                     out[k] = self.radio(v)
                 elif k == "ids" and radio_list:
                     out[k] = [self.radio(x) for x in v]
+                elif isinstance(v, str) and ids and not self.show_radio_ids:
+                    out[k] = self._scrub(v, ids)
                 else:
                     out[k] = self.redact(v, radio_list)
             return out
         if isinstance(obj, list):
             return [self.redact(x, radio_list) for x in obj]
         return obj
+
+    def _scrub(self, text: str, ids: set[int]) -> str:
+        """Every whole-number occurrence of these radio ids in ``text`` becomes its pseudonym."""
+        alt = "|".join(sorted((str(i) for i in ids), key=len, reverse=True))
+        return re.sub(rf"(?<!\d)({alt})(?!\d)", lambda m: str(self.radio(int(m.group(1)))), text)
 
     def carrier(self, s: Store, freq: float | int | str) -> dict[str, Any]:
         """The known carrier nearest to ``freq`` within the raster tolerance."""
@@ -163,7 +190,7 @@ class MapperTools:
         if x["kind"] == "survey":
             out["hits"] = {b: v.get("hits") for b, v in (sm.get("bands") or {}).items()}
         elif x["kind"] == "watch":
-            out["watch"] = {k: v for k, v in (sm.get("watch") or {}).items() if k in ("keyups", "decoded", "missed")}
+            out["watch"] = {k: v for k, v in (sm.get("watch") or {}).items() if k in ("keyups", "decoded", "listened", "missed")}
         else:
             out["carriers"] = len(sm.get("carriers") or {})
         for k in ("error", "note", "stop_reason"):
@@ -232,7 +259,8 @@ class MapperTools:
                               " GROUP BY i.value ORDER BY n DESC", (cid, kind, since // 86400))
                 top = [{"value": r["value"] if kind == "tg" else self.radio(r["value"]), "count": int(r["n"]), "days": int(r["days"])} for r in rows[:15]]
                 idents["talkgroups" if kind == "tg" else "radios"] = {"distinct": len(rows), "top": top}
-            ku = s.conn.execute("SELECT COUNT(*) AS n, SUM(decoded) AS decoded, AVG(end - start) AS avg_s, MAX(start) AS last, MAX(peak_snr_db) AS peak"
+            ku = s.conn.execute("SELECT COUNT(*) AS n, SUM(decoded) AS listened, SUM(dmr_heard) AS dmr, AVG(end - start) AS avg_s,"
+                                " MAX(start) AS last, MAX(peak_snr_db) AS peak"
                                 " FROM keyups WHERE carrier_id = ? AND start >= ?", (cid, since)).fetchone()
             runs = s.conn.execute("SELECT COUNT(*) AS n, MAX(finished) AS last, SUM(finished - started) AS secs FROM ingest_runs WHERE carrier_id = ?",
                                   (cid,)).fetchone()
@@ -253,7 +281,9 @@ class MapperTools:
                          "snr_db_max": obs["snr_max"], "cc_histogram": cc_hist},
             "events": events,
             "identities": idents,
-            "keyups": {"count": ku["n"], "decoded": int(ku["decoded"] or 0), "avg_s": round(float(ku["avg_s"]), 1) if ku["avg_s"] else None,
+            # decoded: DMR heard during the key-up; listened: a connected DSD-FME had its audio (DESIGN.md §3, migration 006)
+            "keyups": {"count": ku["n"], "decoded": int(ku["dmr"] or 0), "listened": int(ku["listened"] or 0),
+                       "avg_s": round(float(ku["avg_s"]), 1) if ku["avg_s"] else None,
                        "last": self.iso(ku["last"]), "peak_snr_db": ku["peak"]},
             "decoding": {"runs": runs["n"], "last": self.iso(runs["last"]), "seconds": round(float(runs["secs"] or 0))},
             "latest_survey": {**hit, "at": self.iso(hit["at"])} if hit else None,
@@ -509,8 +539,9 @@ class MapperTools:
                     time.sleep(1)
                     continue
                 d = st.read_status(s, self.stale_s)
+                summ = _legacy_identity_counts({k: v for k, v in x["summary"].items() if k != "traceback"})
                 out: dict[str, Any] = {"session": {**self._session_brief(x), "params": x["params"],
-                                                   "summary": self._trim(self.redact({k: v for k, v in x["summary"].items() if k != "traceback"}))}}
+                                                   "summary": self._trim(self.redact(summ))}}
                 if d.alive and d.session_id == x["id"]:
                     out["progress"] = d.progress
                 if req:

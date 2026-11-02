@@ -17,13 +17,35 @@ TG_SATURATION = 3
 ADJACENT_DAYS = 1
 
 
+def _radios_by_carrier(ctx: Context) -> dict[int, set[int]]:
+    out: dict[int, set[int]] = defaultdict(set)
+    for r in ctx.store.rows(
+            "SELECT s.carrier_id, i.value FROM identity_sightings s JOIN identities i ON i.id = s.identity_id"
+            " WHERE i.kind = 'radio' AND s.day * 86400 >= ?", (ctx.since,)):
+        out[int(r["carrier_id"])].add(int(r["value"]))
+    return out
+
+
 def _collect(ctx: Context, kind: str, saturation: int, etype: str) -> list[Evidence]:
     rows = ctx.store.rows(
-        "SELECT s.identity_id, s.carrier_id, s.day, s.count, i.value FROM identity_sightings s JOIN identities i ON i.id = s.identity_id"
+        "SELECT s.identity_id, s.carrier_id, s.day, s.count, s.roles, i.value FROM identity_sightings s JOIN identities i ON i.id = s.identity_id"
         " WHERE i.kind = ? AND s.day * 86400 >= ? AND i.value > 0", (kind, ctx.since))
+    # A "talkgroup" known only from a Cap+ channel status (role lsn_active: DSD-FME's Bank lines cannot
+    # tell radios from talkgroups) that the same carrier also shows as a radio (a data response, an
+    # individual preamble or data header) is that radio: 469.4625/469.8 MHz, 2026-10-31, where the
+    # data gateway was the most common "talkgroup". The parser catches it only once it has met the id.
+    radios = _radios_by_carrier(ctx) if kind == "tg" else {}
+    only_status: dict[tuple[int, int], bool] = {}
+    for r in rows:
+        k = (int(r["carrier_id"]), int(r["value"]))
+        roles = {x for x in str(r["roles"] or "").split(",") if x}
+        only_status[k] = only_status.get(k, True) and roles <= {"lsn_active"}
     per_carrier: dict[int, dict[int, set[int]]] = defaultdict(lambda: defaultdict(set))   # carrier → value → days
     for r in rows:
-        per_carrier[int(r["carrier_id"])][int(r["value"])].add(int(r["day"]))
+        cid, value = int(r["carrier_id"]), int(r["value"])
+        if kind == "tg" and only_status[(cid, value)] and value in radios.get(cid, ()):
+            continue
+        per_carrier[cid][value].add(int(r["day"]))
     out: list[Evidence] = []
     for a_id, b_id in combinations(sorted(per_carrier), 2):
         a, b = ctx.carriers.get(a_id), ctx.carriers.get(b_id)

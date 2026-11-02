@@ -66,6 +66,8 @@ watch:                         # mapper watch / console key w: one slice, DSD-FM
   min_keyup_s: 0.5             # shorter bursts are counted, not stored
   preroll_s: 0.5               # audio from before the key-up fed to the new DSD-FME (rebuilt from kept FFT blocks)
   max_hold_s: 30               # a channel decoded this long gives way when another one is waiting
+  min_decoder_s: 4.0           # a decoder lives this long even when its key-up is shorter (DSD-FME must connect)
+  no_dmr_after_s: 8.0          # listened to this long without DMR, over all its key-ups: last in line for the session
   max_instances: 6             # DSD-FME at once on mains (control channels pinned: up to half of them)
   channel_width_hz: 10000      # power measured over this width around each raster channel
 

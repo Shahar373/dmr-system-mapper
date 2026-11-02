@@ -26,6 +26,7 @@ class PcmServer:
         self._srv.listen(1)
         self._srv.settimeout(0.5)
         self._client: socket.socket | None = None
+        self.ever_connected = False         # a client connected at least once (DSD-FME got its audio)
         self._lock = threading.Lock()
         self._stop = threading.Event()
         self._timeout = send_timeout_s
@@ -61,6 +62,7 @@ class PcmServer:
             conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             with self._lock:
                 old, self._client = self._client, conn
+                self.ever_connected = True
             if old is not None:
                 try:
                     old.close()

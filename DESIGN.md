@@ -117,7 +117,12 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   the network's traffic channels first, then unknown carriers, then carriers known to belong
   elsewhere (other networks, unpinned control channels); within one class the most recent key-up;
   a waiting channel takes the decoder of a lower class at once and of its own class after
-  `max_hold_s`, and the one that gave way waits for its key-down. A decoder is retired (bridge
+  `max_hold_s`, and the one that gave way waits for its key-down. A decoder lives at least
+  `min_decoder_s` (4 s) even when its channel keys down sooner, so DSD-FME has time to connect; a
+  waiting channel takes such a lingering decoder first. A channel a connected decoder has listened to
+  for `no_dmr_after_s` (8 s) without DMR, over all its key-ups, is last in line for the session.
+  Per key-up the summary counts `decoded` (DMR heard), `listened` (a connected DSD-FME had its audio),
+  `missed` and `no_decoder`; `never_connected` lists decoders retired before DSD-FME connected. A decoder is retired (bridge
   closed first, so DSD-FME's read ends and it exits, then the process) in a thread of its own: the
   block loop never waits. Instances: `watch.max_instances` (6) on mains,
   `power.battery_watch_instances` (3) on battery, 1 on undervoltage. Key-ups go to `keyups`; a
@@ -189,7 +194,7 @@ CREATE TABLE observations (
   voice               INTEGER NOT NULL DEFAULT 0,   -- VLC + VCn + TLC
   data                INTEGER NOT NULL DEFAULT 0,   -- DATA + R12U/R34U/R_1U bursts
   idle                INTEGER NOT NULL DEFAULT 0,
-  crc_err             INTEGER NOT NULL DEFAULT 0,   -- CRC/FEC error lines
+  crc_err             INTEGER NOT NULL DEFAULT 0,   -- bursts DSD-FME flagged with a CRC/FEC error (line-level errors: run quality)
   no_sync             INTEGER NOT NULL DEFAULT 0,
   cc_dominant         INTEGER,
   cc_consistency      REAL,                 -- share of bursts carrying cc_dominant
@@ -373,6 +378,8 @@ CREATE TABLE names (id, kind,                -- system|site
                     carriers,                -- JSON: carrier frequencies when it was named
                     name, created, updated);
 -- systems and sites gain anchor (the same identity strings) and name (filled from names after every derive).
+-- Migration 006: keyups gains dmr_heard (DSD-FME printed a DMR sync during it); decoded means a DSD-FME was
+-- connected and fed during it, not merely assigned (0 for both on rows from before: not known).
 
 CREATE TABLE schema_meta (version INTEGER NOT NULL);   -- currently 5
 ```
@@ -785,20 +792,28 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   design (§6). DSD-FME's `Net ID: 2`, sub-site 4 on 456.85 MHz is the on-air net 1 site 3: the
   numbering rule of §6 ("Tier III numbering"), not an unexplained offset.
 
-- **Open faults from the same review (not fixed yet).**
-  - Watch: `decoded` in `keyups` and in the session summary means "a decoder was assigned during the
-    key-up" (`record_keyup(k, k.freq_hz in decoded_now or ...)`), not "DMR came out": 108 of 116 in
-    session 12 is an upper bound. A carrier whose key-ups are short (469.1: 1.3 s on average, plus
-    `hang_s` 2 s) has its PCM server closed by `retire()` before DSD-FME connects (42 TCP input
-    failures) and never reaches the 8 s no-DMR check, so it takes a decoder at every key-up.
-  - An id heard only in a `data_response` is not added to `LineParser._individual_targets`, so in a
-    Capacity Plus channel status it is counted as a talkgroup (469.4625 / 469.8: the data gateway
-    64250, which feeds `identity_talkgroup`). `data_response.text` reaches MCP with raw radio ids:
-    `MapperTools.redact` only maps keys (`src`, `tgt`, ...), not text.
-  - `observations.crc_err` adds burst CRC flags, ERR lines and SLCO CRC failures in one column, so
-    it can exceed `bursts` (456.85: 24,007 against 23,997). The decoded data is consistent: counting only.
-  - A session summary showed a radio pseudonym on 456.8 and 457.6 that neither fingerprint lists.
-    Not explained yet.
+- **Faults from the same review, fixed 2026-11-02** (`tests/test_review_1031_fixes.py`, `tests/test_watch.py`).
+  - Watch: `decoded` meant "a decoder was assigned during the key-up", not "DMR came out" (108 of 116
+    in session 12 was an upper bound). Now per key-up `keyups.decoded` means a DSD-FME was connected
+    and fed (as the correlator's `_not_dmr` reads it) and `keyups.dmr_heard` (migration 006) that it
+    printed a DMR sync; the summary counts `decoded` (DMR), `listened`, `missed`, `no_decoder`.
+  - Watch: a carrier with short key-ups (469.1: 1.3 s, plus `hang_s` 2 s) had its PCM server closed
+    before DSD-FME connected (42 connections refused) and never reached the 8 s no-DMR check, so it
+    took a decoder at every key-up. Now a decoder lives `min_decoder_s` (4 s) unless a waiting channel
+    needs it, and the no-DMR check counts connected listening over all key-ups (`no_dmr_after_s`);
+    `never_connected` in the summary lists decoders retired before DSD-FME connected.
+  - Both ends of a `data_response` are now radios for the parser; and a "talkgroup" known on a
+    carrier only from Cap+ channel statuses (role `lsn_active`) that the same carrier shows as a radio
+    no longer counts for `identity_talkgroup` (469.4625 / 469.8: the data gateway 64250 was the most
+    common "talkgroup"). The Bank line's "Private or Data Call(s)" cannot decide it: DSD-FME prints it
+    for group calls too (talkgroup 1 in the Cap+ sample).
+  - `data_response.text` reached MCP with raw radio ids: `MapperTools.redact` now also replaces, in
+    the text fields of a record, the ids its own radio fields hold.
+  - `observations.crc_err` added burst CRC flags, ERR lines and SLCO CRC failures (456.85: 24,007
+    against 23,997 bursts). It now counts bursts; line-level errors stay in the run's quality counters.
+  - The "radio" pseudonym in session 12's summary on 456.8 and 457.6 was no radio: the per-carrier
+    identity counts were keyed `radio` / `tg`, and `redact` took the count (1 on both) for a radio id.
+    They are now `radios` / `talkgroups`; MCP renames them in summaries stored before.
 
 - **SDRTrunk on the 469 MHz network, 2026-11-02** (`sdrtrunk/README.md`). The `lsn` attribute of
   SDRTrunk's DMR timeslot map holds the LCN (its source, v0.6.1 and master). With LCN 1-6 mapped
@@ -820,8 +835,8 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   40 s, with sync losses between, and only the rest repeater sends idle beacons. 458.45 = LCN 2 is
   tentative (it started there and heard REST:3). Site 3 (456.5625, CC 2) announces sites 1, 2 and
   4-7. The conventional repeater on 457.6 (CC 10) sent an ARS registration (UDP 4005) to the same
-  13.0.250.250 through radio 43770: a hint that the Capacity Plus network and the CC 10 repeaters
-  have one operator. A shared configuration choice would look the same, so it is not evidence.
+  13.0.250.250 through radio 43770. That is no sign of one operator: the unrelated VHF Capacity Plus
+  network of `samples/capplus` (May 2026) sends its data to 64250 too, so it is a common setting.
 - **VHF CC 6 (164.325, 165.625), SDRTrunk 2026-10-30.** Both channels decoded at once: voice in the
   same seconds for a minute (16:53:21-16:54:20), the same Activity Update
   (TS1 group voice, hash 07) and CC 6 on both. Their voice LC fails CRC on every call (the same few
