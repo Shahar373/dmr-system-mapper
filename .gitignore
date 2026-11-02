@@ -17,6 +17,11 @@ samples/raw/
 
 # Machine-specific configuration (Tailscale addresses, users, paths, band plans)
 config.local.yaml
+sdrtrunk/*.local.xml
+
+# SDRTrunk event logs (radio ids, LRRP positions) and recordings: never committed
+event_logs/
+sdrtrunk/**/*.log
 
 # Pi runtime output: SQLite, raw-log rotation, exports, survey captures
 var/

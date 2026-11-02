@@ -757,6 +757,8 @@ dmr_mapper/            package (phases 1–5)
 tests/                 pytest, fixtures from samples/ + tests/fixtures/synthetic/
 samples/               checked-in DSD-FME logs (see README)
 deploy/                systemd unit templates (dmr-mapper-mcp.service.in: Phase 5), deploy.sh, archive-pull.sh (Phase 3b)
+sdrtrunk/              SDRTrunk playlist template and notes; the real playlist is playlist.local.xml (git-ignored)
+tools/afsk469/         standalone decoder for the 469.1 MHz telemetry link (not DMR, not imported by dmr_mapper)
 DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
 ```
 
@@ -776,6 +778,64 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   follow carrier ids (now keyed by frequency); `explain` did not show the label thresholds. Rows
   stored before the fix keep a future date until that day is over (`observed_at` only grows), or
   until `mapper correlate --rebuild`.
+
+- **The same review, settled without a change.** SLCO opcode 0xF on a Capacity Max carrier, which
+  DSD-FME prints as `Capacity Plus Site: 0 - Rest LSN: 8`, is stored as `capmax_slco` with its bits
+  (the misleading print kept in `printed_as`) and only feeds the low-weight `identity_slco`: by
+  design (§6). DSD-FME's `Net ID: 2`, sub-site 4 on 456.85 MHz is the on-air net 1 site 3: the
+  numbering rule of §6 ("Tier III numbering"), not an unexplained offset.
+
+- **Open faults from the same review (not fixed yet).**
+  - Watch: `decoded` in `keyups` and in the session summary means "a decoder was assigned during the
+    key-up" (`record_keyup(k, k.freq_hz in decoded_now or ...)`), not "DMR came out": 108 of 116 in
+    session 12 is an upper bound. A carrier whose key-ups are short (469.1: 1.3 s on average, plus
+    `hang_s` 2 s) has its PCM server closed by `retire()` before DSD-FME connects (42 TCP input
+    failures) and never reaches the 8 s no-DMR check, so it takes a decoder at every key-up.
+  - An id heard only in a `data_response` is not added to `LineParser._individual_targets`, so in a
+    Capacity Plus channel status it is counted as a talkgroup (469.4625 / 469.8: the data gateway
+    64250, which feeds `identity_talkgroup`). `data_response.text` reaches MCP with raw radio ids:
+    `MapperTools.redact` only maps keys (`src`, `tgt`, ...), not text.
+  - `observations.crc_err` adds burst CRC flags, ERR lines and SLCO CRC failures in one column, so
+    it can exceed `bursts` (456.85: 24,007 against 23,997). The decoded data is consistent: counting only.
+  - A session summary showed a radio pseudonym on 456.8 and 457.6 that neither fingerprint lists.
+    Not explained yet.
+
+- **SDRTrunk on the 469 MHz network, 2026-11-02** (`sdrtrunk/README.md`). The `lsn` attribute of
+  SDRTrunk's DMR timeslot map holds the LCN (its source, v0.6.1 and master). With LCN 1-6 mapped
+  (1 469.15, 2 469.35, 3 469.65, 4 469.0625, 5 456.85, 6 456.9125) SDRTrunk followed the grants to
+  469.15 and 469.0625; in the logs of 30-31 October, without a map, all 1,114 grants were "NO
+  FREQUENCY". In 25 minutes: 7 voice calls, all on talkgroup 10101 and in the clear (the
+  "encrypted" lines in those logs are CRC failures with random colour codes). Three calls were
+  granted on site 1 (LCN 1) and site 2 (LCN 4) in the same second: wide-area calls, behavioural
+  evidence that sites 1 and 2 are one system, which the correlator does not collect yet. Most of
+  the traffic is LRRP: the location server (id 255, IP 13.0.0.255) triggers a report every 30 s;
+  297 fixes from 23 radios and 153 "no GPS" answers. Twice it was told `QUEUED FOR RESOURCE` for
+  about 30 radios within 10 s (site 1 has two repeaters). Those CSBKs mostly fail SDRTrunk's CRC
+  too but carry consistent fields: a keyed CRC whose mask it had not learned. Two grants named LCN
+  256 with 24-bit ids, at the same second as a `QUEUED` with odd ids: probably a Motorola message
+  SDRTrunk misreads, not a repeater. Site 3 (456.85) was not heard from that location.
+- **Capacity Plus, the other network on 456-469 MHz.** Voice on talkgroup 10 is encrypted; data
+  goes to the gateway 64250 = IP 13.0.250.250 (LRRP, UDP 4001). Site 1 has a second repeater on
+  458.575: SDRTrunk, given 458.45 and 458.575, heard idle beacons with REST:3 and with REST:1 within
+  40 s, with sync losses between, and only the rest repeater sends idle beacons. 458.45 = LCN 2 is
+  tentative (it started there and heard REST:3). Site 3 (456.5625, CC 2) announces sites 1, 2 and
+  4-7. The conventional repeater on 457.6 (CC 10) sent an ARS registration (UDP 4005) to the same
+  13.0.250.250 through radio 43770: a hint that the Capacity Plus network and the CC 10 repeaters
+  have one operator. A shared configuration choice would look the same, so it is not evidence.
+- **VHF CC 6 (164.325, 165.625), SDRTrunk 2026-10-30.** Both channels decoded at once: voice in the
+  same seconds for a minute (16:53:21-16:54:20), the same Activity Update
+  (TS1 group voice, hash 07) and CC 6 on both. Their voice LC fails CRC on every call (the same few
+  garbled values repeat), so no talkgroup or radio is shown. This looks like a linked conventional
+  pair (IP Site Connect or similar); the mapper has only 0.065 from `identity_slco`. Key-ups at the
+  same time on two Tier II carriers (one watch slice holds both) would be a new evidence type,
+  capped like all Tier II evidence.
+- **469.1 MHz is analogue telemetry, not DMR** (`tools/afsk469/README.md`). NBFM carrying audio FSK
+  at 902/1503 Hz and 600 baud; the bit is the length of each tone segment (1 symbol = 0, 2 = 1), a
+  4-symbol segment separates frames, and frames of 64 or 32 bits repeat 3-8 times with even parity.
+  It is a polling link: a central station and outstations that answer with the same address field.
+  The mapper's "not DMR" was right, even though its decodes of it never had audio (above).
+  423.125 and 169.8625 MHz showed no DMR sync in SDRTrunk either; they are to be identified from
+  baseband recordings.
 
 - **No rf evidence fixture.** `samples/surveyor` has no candidate list with SNR. `rf_profile`
   is implemented against `observations` and tested synthetically; its weight is deliberately low.
