@@ -155,6 +155,8 @@ mapper survey --dwell 8                            # 8 s per step for this sessi
 mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the recent sweeps
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions
+mapper session                     # the latest session's full summary, running or finished (after --no-wait or a closed terminal)
+mapper session 12 --json           # one session by id; --last 5 for the five latest, --traceback for a failed one's
 mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
 ```
 

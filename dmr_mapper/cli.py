@@ -74,6 +74,64 @@ def cmd_status(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_view(sess: dict, tz, progress: dict | None, with_traceback: bool = False) -> dict:
+    """One session for `mapper session --json`: the row, its params and the summary digest."""
+    import time
+
+    def iso(ts):
+        return datetime.fromtimestamp(int(ts), tz=tz).isoformat(timespec="seconds") if ts else None
+
+    elapsed = sess["summary"].get("elapsed_s")
+    if elapsed is None and sess["status"] == "running" and sess.get("started"):
+        elapsed = int(time.time()) - int(sess["started"])     # a running session's summary has no elapsed_s yet
+    out = {"id": sess["id"], "kind": sess["kind"], "status": sess["status"], "requested_by": sess["requested_by"],
+           "budget_s": sess["budget_s"], "created": iso(sess.get("created")), "started": iso(sess.get("started")),
+           "finished": iso(sess.get("finished")), "elapsed_s": elapsed, "params": sess["params"],
+           "summary": _summary_digest(sess["summary"], with_traceback)}
+    if progress is not None:
+        out["progress"] = progress
+    return out
+
+
+def cmd_session(args: argparse.Namespace) -> int:
+    from zoneinfo import ZoneInfo
+
+    from .collector import state as st
+
+    cfg = load_config(args.config)
+    if args.id is not None and args.last is not None:
+        print("error: give a session id or --last N, not both", file=sys.stderr)
+        return 2
+    if args.last is not None and args.last < 1:
+        print("error: --last needs a positive number", file=sys.stderr)
+        return 2
+    tz = ZoneInfo(str(cfg.get("timezone") or "UTC"))
+    with _open_store(args, cfg) as store:
+        found = st.sessions(store, args.last or 1, session_id=args.id)
+        if not found:
+            print(f"no session #{args.id}" if args.id is not None else "no session has run yet", file=sys.stderr)
+            return 1
+        ds = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+    views = [_session_view(x, tz, ds.progress if ds.alive and ds.session_id == x["id"] else None, args.traceback)
+             for x in found]
+    if args.json:
+        print(json.dumps(views if args.last is not None else views[0], indent=2))
+        return 0
+    for i, v in enumerate(views):
+        if i:
+            print()
+        elapsed = v["elapsed_s"]
+        el = "-" if elapsed is None else f"{elapsed} s" + (" so far" if v["status"] == "running" else "")
+        print(f"session {v['id']}  {v['kind']}  {v['status']}  requested_by {v['requested_by']}  budget {v['budget_s']} s"
+              f"  started {v['started'] or '-'}  elapsed {el}")
+        if v["params"]:
+            print(f"params: {json.dumps(v['params'], sort_keys=True)}")
+        if "progress" in v:
+            print(f"progress: {_progress_line(v['progress'])}")
+        _print_summary(v["summary"], with_traceback=args.traceback)
+    return 0
+
+
 def _parse_now(text: str | None) -> int | None:
     if not text:
         return None
@@ -288,6 +346,23 @@ def _session_command(args: argparse.Namespace, kind: str, params: dict) -> int:
             th.join(timeout=20)
 
 
+def _summary_digest(summary: dict, with_traceback: bool = False) -> dict:
+    """A session summary as the CLI shows it: everything but the traceback of a failed session.
+    The summary holds counts, never radio ids (identities are counted as ``radios``/``talkgroups``),
+    so nothing here needs the pseudonyms the MCP layer gives them."""
+    return {k: v for k, v in (summary or {}).items() if with_traceback or k != "traceback"}
+
+
+def _print_summary(summary: dict, limit: int | None = None, with_traceback: bool = False) -> None:
+    text = json.dumps(_summary_digest(summary, with_traceback), indent=2)
+    print(text[:limit] if limit else text)
+
+
+def _progress_line(progress: dict | None) -> str:
+    """The daemon's progress for the running session, one line (the carrier table left out)."""
+    return json.dumps({k: v for k, v in (progress or {}).items() if k != "carriers"}, sort_keys=True)
+
+
 def _follow(store: Store, cfg: dict, session_id: int) -> int:
     """Print progress until the session ends, then its summary."""
     import time
@@ -300,7 +375,7 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
         sess = next((x for x in st.sessions(store, 5) if x["id"] == session_id), None)
         if sess and sess["status"] in ("done", "stopped", "failed"):
             print(f"session {session_id} {sess['status']} after {sess['summary'].get('elapsed_s', 0)} s")
-            print(json.dumps({k: v for k, v in sess["summary"].items() if k != "traceback"}, indent=2)[:4000])
+            _print_summary(sess["summary"], limit=4000)
             sm = sess["summary"]
             if sess["status"] != "failed" and (sm.get("then_decode_s") or sm.get("campaign_next")):
                 # the one-button flow or a campaign: the daemon queued the next session; follow that one too
@@ -323,8 +398,7 @@ def _follow(store: Store, cfg: dict, session_id: int) -> int:
         if not s.alive:
             print("daemon went away", file=sys.stderr)
             return 1
-        pr = s.progress or {}
-        line = json.dumps({k: v for k, v in pr.items() if k != "carriers"}, sort_keys=True)
+        line = _progress_line(s.progress)
         if line != last:
             print(line, file=sys.stderr)
             last = line
@@ -680,6 +754,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     st = sub.add_parser("status", help="database summary")
     st.set_defaults(func=cmd_status)
+
+    se = sub.add_parser("session", help="a session's full summary (the latest when no id is given), running or finished")
+    se.add_argument("id", nargs="?", type=int, help="session id from `mapper status` (default: the latest)")
+    se.add_argument("--last", type=int, metavar="N", help="the N latest sessions, newest first")
+    se.add_argument("--json", action="store_true", help="print the sessions as JSON")
+    se.add_argument("--traceback", action="store_true", help="include the traceback of a failed session")
+    se.set_defaults(func=cmd_session)
 
     co = sub.add_parser("correlate", help="run the evidence engine and derive sites/systems")
     co.add_argument("--window-days", type=int, help="look back this many days (default: correlator.window_days)")
