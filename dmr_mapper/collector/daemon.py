@@ -53,6 +53,13 @@ class BudgetDone(SessionStop):
     """The session used its time budget: a normal end."""
 
 
+class DriverTimeout(Exception):
+    """A receiver driver call (probe or open) did not return in time, or an earlier one is still blocked."""
+
+
+DB_ERROR_LOG_EVERY_S = 60    # a database error that repeats every tick is logged at most this often
+
+
 class Daemon:
     def __init__(self, db_path: str | Path, cfg: dict[str, Any], backend: Backend | None = None, source_tag: str = "daemon"):
         self.db_path = Path(db_path)
@@ -84,6 +91,16 @@ class Daemon:
         self._stop_reason: str | None = None
         self._job: threading.Thread | None = None   # correlate / export, off the main loop
         self._last_checkpoint = 0.0
+        # Driver calls run in a worker thread with a time limit (see _driver_call): a SoapySDR call
+        # that blocks (the SDRplay API waiting for a receiver another program holds) must not stop
+        # the heartbeat and the command queue. Keep probe + open under the CLI's 30 s wait.
+        self.probe_timeout_s = float(dcfg.get("sdr_probe_timeout_s", 10))
+        self.open_timeout_s = float(dcfg.get("sdr_open_timeout_s", 15))
+        self.pending_max_age_s = int(dcfg.get("pending_command_max_age_s", 300))
+        self._stuck: tuple[threading.Thread, str, float] | None = None   # an abandoned driver call still blocked
+        self._unreported: list[tuple[int, bool, str]] = []                # results whose write failed: retried each tick
+        self._db_errors = 0
+        self._db_error_logged = float("-inf")
 
     # -- main loop ---------------------------------------------------------------------------------
     def _acquire_lock(self) -> None:
@@ -92,7 +109,7 @@ class Daemon:
         import fcntl
 
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
-        fh = open(str(self.db_path) + ".daemon.lock", "a+")
+        fh = open(st.lock_path(self.db_path), "a+")
         try:
             fcntl.flock(fh, fcntl.LOCK_EX | fcntl.LOCK_NB)
         except OSError:
@@ -125,13 +142,24 @@ class Daemon:
         self.message = "started"
         log.info("daemon started: pid %s, database %s, receiver backend %s", self.pid, self.db_path, type(self.backend).__name__)
         try:
+            # we hold the lock, so no other daemon is alive: what an earlier one left half-done is dead
+            rec = st.recover_commands(self._store, self.pending_max_age_s)
+            if any(rec.values()):
+                log.warning("command queue: %d command(s) an earlier daemon took and never answered marked failed;"
+                            " %d pending command(s) older than %d s expired", rec["taken_failed"], rec["pending_expired"],
+                            self.pending_max_age_s)
             while not self.stop_event.is_set():
                 try:
                     self._tick()
+                    if self._db_errors:
+                        log.info("database: writable again after %d failed tick(s)", self._db_errors)
+                        self._db_errors = 0
+                        self._db_error_logged = float("-inf")
                 except sqlite3.OperationalError as exc:
-                    # a transient lock (a client writing a command at the wrong moment): try again next tick
-                    self.message = f"database busy: {exc}"
-                    self._store.rollback()
+                    # usually a transient lock (a client writing at the wrong moment): try again next tick.
+                    # It can also last (disk full, I/O error, a writer that never lets go); then the
+                    # heartbeat goes stale with it, so say so in the journal, at most once a minute.
+                    self._db_error(exc)
                 self.stop_event.wait(self.tick_s)
             if self.session_thread is not None and self.session_thread.is_alive():
                 self.session_stop.set()
@@ -144,6 +172,94 @@ class Daemon:
             self._store.close()
             self._release_lock()
         return 0
+
+    def _db_error(self, exc: Exception) -> None:
+        try:
+            self._store.rollback()
+        except sqlite3.Error:
+            pass
+        self._db_errors += 1
+        self.message = f"database error: {exc}"
+        now = time.monotonic()
+        if now - self._db_error_logged >= DB_ERROR_LOG_EVERY_S:
+            log.warning("database error in the main loop: %s (%d failed tick(s) in a row; the heartbeat and the command"
+                        " queue wait until it clears)", exc, self._db_errors)
+            self._db_error_logged = now
+        self._beat()          # the heartbeat may still get through and carry the message to the clients
+
+    def _beat(self, message: str | None = None) -> bool:
+        """Write the heartbeat; False (and nothing raised) when the database refuses it."""
+        assert self._store is not None
+        with self._lock:
+            progress = dict(self.progress)
+        try:
+            st.write_heartbeat(self._store, self.pid, self.started, self.mode, self.session_id, self.sdr.to_dict(), self.power.to_dict(),
+                               progress, message or self.message)
+            return True
+        except sqlite3.OperationalError:
+            try:
+                self._store.rollback()
+            except sqlite3.Error:
+                pass
+            return False
+
+    def _driver_call(self, fn: Any, timeout_s: float, what: str) -> Any:
+        """Call ``fn`` (a receiver driver call) in a worker thread and wait at most ``timeout_s``,
+        refreshing the heartbeat meanwhile. On a timeout the call is abandoned, not killed (a thread
+        blocked in C cannot be): it is remembered, no other driver call starts while it is still
+        blocked, and if it returns an open receiver later, that receiver is closed at once.
+
+        This relies on the driver binding releasing the GIL while it blocks (SWIG bindings built
+        with threads do; check the Pi's build with ``py-spy dump``); a call that blocks while
+        holding the GIL still freezes the whole process, heartbeat and journal included."""
+        if self._stuck is not None:
+            th, was, since = self._stuck
+            if th.is_alive():
+                raise DriverTimeout(f"an earlier receiver {was} is still blocked in the driver"
+                                    f" ({time.monotonic() - since:.0f} s); restart the daemon if it never returns")
+            self._stuck = None
+        box: dict[str, Any] = {}
+        guard = threading.Lock()
+        t0 = time.monotonic()
+
+        def run() -> None:
+            try:
+                box["value"] = fn()
+            except BaseException as exc:  # noqa: BLE001 - handed back to the caller
+                box["error"] = exc
+            with guard:
+                box["done"] = True
+                late = box.get("abandoned", False)
+            if late:
+                closed = False
+                if "value" in box and hasattr(box["value"], "close"):
+                    try:
+                        box["value"].close()
+                        closed = True
+                    except Exception:  # noqa: BLE001
+                        pass
+                log.warning("receiver driver: the %s abandoned after %.0f s returned after %.0f s%s", what, timeout_s,
+                            time.monotonic() - t0, "; the receiver was released again" if closed else "")
+
+        th = threading.Thread(target=run, name=f"sdr-{what}", daemon=True)
+        th.start()
+        while True:
+            left = t0 + timeout_s - time.monotonic()
+            th.join(timeout=max(0.0, min(1.0, left)))
+            if not th.is_alive() or left <= 0:
+                break
+            self._beat(f"waiting for the receiver driver ({what}, {time.monotonic() - t0:.0f} s)")
+        with guard:
+            if not box.get("done"):
+                box["abandoned"] = True
+        if box.get("abandoned"):
+            self._stuck = (th, what, t0)
+            log.warning("receiver driver: %s did not return within %.0f s; abandoned (the call stays blocked in its thread)",
+                        what, timeout_s)
+            raise DriverTimeout(f"receiver {what} timed out after {timeout_s:.0f} s")
+        if "error" in box:
+            raise box["error"]
+        return box["value"]
 
     def _install_signals(self) -> None:
         def _stop(signum: int, frame: Any) -> None:
@@ -177,6 +293,7 @@ class Daemon:
             if now - self._last_probe >= self.probe_interval_s:
                 self._idle_probe(now)
                 self._last_probe = now
+        self._report()                        # answers a failed write kept from an earlier tick
         for _ in range(5):
             cmd = st.take_command(self._store)
             if cmd is None:
@@ -190,7 +307,8 @@ class Daemon:
                 continue                      # a worker finishes it
             ok, result = res
             (log.info if ok else log.warning)("command %s from %s: %s", cmd["kind"], cmd.get("source"), result)
-            st.finish_command(self._store, int(cmd["id"]), ok, result)
+            self._unreported.append((int(cmd["id"]), ok, result))
+            self._report()
         if now - self._last_checkpoint >= 30:
             # the session threads leave checkpoints to this loop (see _session_main)
             self._store.conn.execute("PRAGMA wal_checkpoint(PASSIVE)")
@@ -199,6 +317,14 @@ class Daemon:
             progress = dict(self.progress)
         st.write_heartbeat(self._store, self.pid, self.started, self.mode, self.session_id, self.sdr.to_dict(), self.power.to_dict(),
                            progress, self.message)
+
+    def _report(self) -> None:
+        """Write the commands' answers; one the database refuses stays queued for the next tick
+        instead of leaving its command ``taken`` for ever."""
+        while self._unreported:
+            cid, ok, result = self._unreported[0]
+            st.finish_command(self._store, cid, ok, result)    # raises: kept, the next tick tries again
+            self._unreported.pop(0)
 
     def _idle_probe(self, now: float) -> None:
         """While idle, only look at whether the receiver is plugged in (no driver call): asking the
@@ -222,7 +348,12 @@ class Daemon:
 
     def _probe(self) -> SdrStatus:
         try:
-            status = self.backend.probe()
+            status = self._driver_call(self.backend.probe, self.probe_timeout_s, "probe")
+        except DriverTimeout as exc:
+            # an open still blocked in the driver: the receiver is as busy as when it timed out
+            still_open = self._stuck is not None and self._stuck[1] == "open"
+            status = SdrStatus("busy" if still_open else "error", self.sdr.driver, self.sdr.serial,
+                               self.sdr.holder if still_open else None, str(exc)[:200], int(time.time()))
         except Exception as exc:  # noqa: BLE001
             status = SdrStatus("error", None, None, None, str(exc)[:200], int(time.time()))
         if status.status != self.sdr.status or status.holder != self.sdr.holder:
@@ -269,7 +400,13 @@ class Daemon:
             # Open the receiver here, before reporting "started": a refusal from the driver then
             # reaches the operator as the command's result, with the driver's own words.
             try:
-                source = self.backend.open()
+                source = self._driver_call(self.backend.open, self.open_timeout_s, "open")
+            except DriverTimeout as exc:
+                # the driver neither opened the receiver nor refused: almost always another program
+                # holding it (the SDRplay API can wait for it instead of saying "busy")
+                holder = self.sdr.holder or guess_holder(self.cfg)
+                self.sdr = SdrStatus("busy", self.sdr.driver, self.sdr.serial, holder, str(exc)[:200], int(time.time()))
+                return False, f"{exc}" + (f", in use by {holder}" if holder else "; another program may be holding the receiver")
             except Exception as exc:  # noqa: BLE001
                 holder = self.sdr.holder or guess_holder(self.cfg)
                 self.sdr = SdrStatus("busy", self.sdr.driver, self.sdr.serial, holder, str(exc)[:200], int(time.time()))

@@ -210,6 +210,68 @@ def sessions(store: Store, limit: int = 20, session_id: int | None = None) -> li
     return out
 
 
+def recover_commands(store: Store, pending_max_age_s: int) -> dict[str, int]:
+    """Run by a daemon as it starts, holding the lock: no other daemon is alive on this database.
+
+    * a ``taken`` command was claimed by an earlier daemon that died or hung before answering:
+      nobody will ever finish it, so it is marked failed (its client gave up long ago);
+    * a ``pending`` command older than ``pending_max_age_s`` was posted while no daemon could take
+      it (e.g. by a client that then hit an error or a Ctrl-C): starting it now, perhaps hours later
+      and somewhere else, would surprise the operator, so it expires. ``0`` keeps them all.
+    """
+    now = _now()
+    taken = store.conn.execute(
+        "UPDATE commands SET status = 'failed', done_at = ?, result = ? WHERE status = 'taken'",
+        (now, "the daemon that took this command stopped or hung before answering it; ask again")).rowcount
+    expired = 0
+    if pending_max_age_s > 0:
+        expired = store.conn.execute(
+            "UPDATE commands SET status = 'expired', done_at = ?, result = ? WHERE status = 'pending' AND created < ?",
+            (now, "posted while no daemon was taking commands; ask again", now - int(pending_max_age_s))).rowcount
+    store.commit()
+    return {"taken_failed": taken, "pending_expired": expired}
+
+
+def explain_unanswered(kind: str, command_id: int, c: dict[str, Any] | None, waited_s: float) -> str:
+    """What a client tells the operator when ``wait_for_command`` came back without an answer."""
+    status = (c or {}).get("status")
+    if status == "taken":
+        return (f"{kind}: the daemon took command #{command_id} but has not answered in {waited_s:.0f} s."
+                " It may be stuck in the receiver driver: see `mapper status` and `journalctl -u dmr-mapper`.")
+    if status == "pending":
+        return (f"{kind}: command #{command_id} is still waiting: the daemon has not taken it in {waited_s:.0f} s."
+                " See `mapper status` and `journalctl -u dmr-mapper`.")
+    return f"{kind}: command #{command_id} is {status or 'missing'}"
+
+
+def lock_path(db_path: str | os.PathLike[str]) -> str:
+    """One daemon per database: it holds an exclusive flock on this file while it runs."""
+    return str(db_path) + ".daemon.lock"
+
+
+def lock_holder(db_path: str | os.PathLike[str]) -> str | None:
+    """The pid written in the lock file if a daemon holds the lock now, else None. The kernel drops
+    a flock when its process dies, so a held lock means a live process, heartbeat or not.
+    (Only asks: a free lock is released again at once.)"""
+    import fcntl
+
+    path = lock_path(db_path)
+    if not os.path.exists(path):
+        return None
+    try:
+        fh = open(path, "r")
+    except OSError:
+        return None
+    with fh:
+        try:
+            fcntl.flock(fh, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except OSError:
+            fh.seek(0)
+            return fh.read().strip() or "?"
+        fcntl.flock(fh, fcntl.LOCK_UN)
+        return None
+
+
 def wait_for_command(store: Store, command_id: int, timeout_s: float = 30.0, poll_s: float = 0.5) -> dict[str, Any] | None:
     """Block until the daemon has taken and finished the command (CLI convenience)."""
     deadline = time.monotonic() + timeout_s

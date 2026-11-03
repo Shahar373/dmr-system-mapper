@@ -61,7 +61,15 @@ def cmd_status(args: argparse.Namespace) -> int:
     with _open_store(args, cfg) as store:
         print(f"db: {store.path}  schema v{store.schema_version()}")
         ds = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
-        print(f"daemon: {'alive, mode ' + ds.mode if ds.alive else 'not running'}" + (f"  ({ds.message})" if ds.message else ""))
+        holder = None if ds.alive or store.path is None else st.lock_holder(store.path)
+        if holder is not None:
+            print(f"daemon: STALE: {_stale_daemon_text(holder, ds)}")
+        else:
+            print(f"daemon: {'alive, mode ' + ds.mode if ds.alive else 'not running'}" + (f"  ({ds.message})" if ds.message else ""))
+        for c in st.recent_commands(store, 10):
+            if c["status"] in ("pending", "taken"):
+                print(f"  command #{c['id']} {c['kind']} from {c['source']}: {c['status']} since"
+                      f" {datetime.fromtimestamp(c['taken_at'] or c['created'], tz=timezone.utc).astimezone():%H:%M:%S}")
         for sess in st.sessions(store, 3):
             print(f"  session {sess['id']} {sess['kind']} {sess['status']} budget {sess['budget_s']}s elapsed {sess['summary'].get('elapsed_s', '-')}s")
         for name in ("carriers", "observations", "csbk_events", "rest_events", "identities", "identity_sightings",
@@ -303,6 +311,38 @@ def cmd_tui(args: argparse.Namespace) -> int:
     return 0
 
 
+COMMAND_WAIT_S = 30     # how long the CLI waits for the daemon to answer a session command
+
+
+def _stale_daemon_text(holder: str, status) -> str:
+    """A daemon holds the database's lock (so its process is alive) but its heartbeat is stale."""
+    import time
+
+    age = f"{int(time.time()) - int(status.heartbeat)} s ago" if status.heartbeat else "never"
+    said = f", it last said: {status.message}" if status.message else ""
+    return (f"the daemon (pid {holder}) is running but its heartbeat is stale (last one {age}{said}). It is probably stuck;"
+            " nothing was asked of it. See `mapper status` and `journalctl -u dmr-mapper`, and"
+            " `sudo systemctl restart dmr-mapper` if it does not recover.")
+
+
+def _daemon_down_text(path: Path, status) -> str:
+    from .collector import state as st
+
+    holder = st.lock_holder(path)
+    return _stale_daemon_text(holder, status) if holder is not None else "daemon is not running"
+
+
+def _answer(kind: str, cid: int, c: dict | None) -> bool:
+    """Print what became of a session command; True when the daemon answered it (done or failed)."""
+    from .collector import state as st
+
+    if c and c["status"] in ("done", "failed"):
+        print(f"{kind}: {c['status']}: {c['result']}")
+        return True
+    print(st.explain_unanswered(kind, cid, c, COMMAND_WAIT_S), file=sys.stderr)
+    return False
+
+
 def _session_command(args: argparse.Namespace, kind: str, params: dict) -> int:
     """Post a command to the running daemon, or run a temporary in-process daemon when none is
     running (so `mapper survey` works on a Pi before the service is installed)."""
@@ -314,32 +354,57 @@ def _session_command(args: argparse.Namespace, kind: str, params: dict) -> int:
 
     cfg = load_config(args.config)
     path = _db_path(args, cfg)
+    stale_s = int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10))
     if args.minutes:
         params["budget_s"] = int(args.minutes * 60)
     with Store(path) as store:
-        status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        status = st.read_status(store, stale_s)
         if status.alive:
             cid = st.post_command(store, "cli", kind, params)
-            c = st.wait_for_command(store, cid, timeout_s=30)
-            print(f"{kind}: {c['status']}: {c['result']}" if c else f"{kind}: posted as command {cid}")
-            if not args.wait or not c or c["status"] != "done":
-                return 0 if c and c["status"] == "done" else 1
+            c = st.wait_for_command(store, cid, timeout_s=COMMAND_WAIT_S)
+            if not _answer(kind, cid, c) or c["status"] != "done":
+                return 1
+            if not args.wait:
+                return 0
             return _follow(store, cfg, int(c["result"].split()[1]))
+    # No heartbeat. A daemon may still be alive and stuck: then it holds the lock, a temporary daemon
+    # could not start, and a command posted now would wait for whoever restarts it.
+    holder = st.lock_holder(path)
+    if holder is not None:
+        print(f"error: {_stale_daemon_text(holder, status)}", file=sys.stderr)
+        return 1
     d = Daemon(path, cfg)
-    th = threading.Thread(target=d.run, daemon=True)
+    failed: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            d.run()
+        except BaseException as exc:  # noqa: BLE001 - reported below, without a thread traceback
+            failed.append(exc)
+
+    th = threading.Thread(target=run, daemon=True)
     th.start()
     with Store(path) as store:
+        cid = None
         try:
-            time.sleep(0.5)
+            deadline = time.monotonic() + 10
+            while th.is_alive() and time.monotonic() < deadline:
+                s = st.read_status(store, stale_s)
+                if s.alive and s.pid == os.getpid():
+                    break
+                time.sleep(0.1)
+            if not th.is_alive():
+                print(f"error: the temporary daemon could not start: {failed[0] if failed else 'it stopped'}", file=sys.stderr)
+                return 1
             cid = st.post_command(store, "cli", kind, params)
-            c = st.wait_for_command(store, cid, timeout_s=30)
-            print(f"{kind}: {c['status']}: {c['result']}" if c else "no answer from the temporary daemon")
-            if not c or c["status"] != "done":
+            c = st.wait_for_command(store, cid, timeout_s=COMMAND_WAIT_S)
+            if not _answer(kind, cid, c) or c["status"] != "done":
                 return 1
             return _follow(store, cfg, int(c["result"].split()[1]))
         except KeyboardInterrupt:
-            st.post_command(store, "cli", "stop")
-            time.sleep(2)
+            if cid is not None:
+                st.post_command(store, "cli", "stop")
+                time.sleep(2)
             return 130
         finally:
             d.stop_event.set()
@@ -531,11 +596,14 @@ def cmd_control(args: argparse.Namespace) -> int:
     with Store(_db_path(args, cfg)) as store:
         status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
         if not status.alive:
-            print("daemon is not running", file=sys.stderr)
+            print(_daemon_down_text(_db_path(args, cfg), status), file=sys.stderr)
             return 1
         cid = st.post_command(store, "cli", args.kind, {})
         c = st.wait_for_command(store, cid, timeout_s=120)
-        print(f"{args.kind}: {c['status']}: {c['result']}" if c else "no answer")
+        if c and c["status"] in ("done", "failed"):
+            print(f"{args.kind}: {c['status']}: {c['result']}")
+        else:
+            print(st.explain_unanswered(args.kind, cid, c, 120), file=sys.stderr)
         return 0 if c and c["status"] == "done" else 1
 
 
@@ -570,8 +638,11 @@ def cmd_decide(args: argparse.Namespace) -> int:
         if cid is None:
             print("no request is waiting for approval", file=sys.stderr)
             return 1
-        if approve and not st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10))).alive:
-            print("the daemon is not running: start it first (sudo systemctl start dmr-mapper)", file=sys.stderr)
+        ds = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
+        if approve and not ds.alive:
+            down = _daemon_down_text(_db_path(args, cfg), ds)
+            print(down if down != "daemon is not running" else "the daemon is not running: start it first (sudo systemctl start dmr-mapper)",
+                  file=sys.stderr)
             return 1
         try:
             c = st.decide(store, int(cid), approve, "cli", timeout)
@@ -582,7 +653,10 @@ def cmd_decide(args: argparse.Namespace) -> int:
         print(f"#{cid} {'approved' if approve else 'refused'}: {st.describe_request(c['kind'], params)}")
         if approve:
             done = st.wait_for_command(store, int(cid), timeout_s=30)
-            print(f"  {done['status']}: {done['result']}" if done else "  posted; the daemon has not taken it yet")
+            if done and done["status"] in ("done", "failed"):
+                print(f"  {done['status']}: {done['result']}")
+            else:
+                print("  " + st.explain_unanswered(c["kind"], int(cid), done, 30))
     return 0
 
 
@@ -706,7 +780,9 @@ def cmd_doctor(args: argparse.Namespace) -> int:
         size = path.stat().st_size if path.exists() else 0
         line(True, "database", f"{path} schema v{store.schema_version()} {size / 1e6:.1f} MB")
         status = st.read_status(store, int(cfg.get("daemon", {}).get("heartbeat_stale_s", 10)))
-        line(None, "daemon", f"{'alive' if status.alive else 'not running'}" + (f", mode {status.mode}" if status.alive else ""))
+        holder = None if status.alive else st.lock_holder(path)
+        line(False if holder is not None else None, "daemon",
+             f"alive, mode {status.mode}" if status.alive else (f"stale heartbeat: pid {holder} holds the lock" if holder else "not running"))
     mcfg = cfg.get("mcp", {}) or {}
     if mcfg.get("enabled"):
         try:

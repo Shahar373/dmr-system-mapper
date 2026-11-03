@@ -220,7 +220,9 @@ Troubleshooting:
 - **Every scan "declined" at once, no dialog seen**: the client refuses server dialogs; set
   `mcp.approval: client` (or `console`) and restart the service.
 
-## 7. Debugging decodes
+## 7. Debugging
+
+### Decodes
 
 `decode.keep_raw_logs: true` in `config.local.yaml` (then `sudo systemctl restart dmr-mapper`)
 keeps DSD-FME's raw output per carrier and slice in `var/raw/` as
@@ -228,6 +230,56 @@ keeps DSD-FME's raw output per carrier and slice in `var/raw/` as
 at `raw_log_max_mb × raw_log_keep` in total (250 MB by default), oldest deleted first. These files
 replay with `mapper ingest var/raw/`. Turn it off again afterwards; nothing else is ever kept raw,
 and IQ is never kept.
+
+### A daemon that does not answer
+
+The daemon's main loop writes a heartbeat every `daemon.tick_s`; clients call it dead after
+`daemon.heartbeat_stale_s` (10 s) without one. A daemon can be alive (its pid in the journal) and
+still miss heartbeats. What it does about that, and what the clients say:
+
+* **The receiver driver blocks.** With another program holding the SDRplay receiver, the driver can
+  wait instead of saying "busy". Probing and opening the receiver run in a worker thread with a limit
+  (`daemon.sdr_probe_timeout_s`, 10 s; `daemon.sdr_open_timeout_s`, 15 s; keep the two under the
+  CLI's 30 s wait). The heartbeat keeps going meanwhile. Past the limit the command fails with
+  `receiver open timed out after 15 s, in use by <program> (pid N)` and the journal says
+  `receiver driver: open did not return within 15 s; abandoned`. The call cannot be killed, so it
+  stays blocked in its thread. Until it returns, every session is refused at once with `an earlier
+  receiver open is still blocked in the driver`, and other commands (stop, correlate, export) still
+  work. If the driver opens the receiver later, the daemon closes it again at once (journal:
+  `the open abandoned after 15 s returned after N s; the receiver was released again`). If it never
+  returns, stop the other program and `sudo systemctl restart dmr-mapper`. This relies on the
+  SoapySDR bindings releasing the Python GIL while they block (SWIG bindings built with threads do;
+  this has not been confirmed on the Pi's Debian build). A call that blocks while holding the GIL
+  still freezes the whole daemon: then nothing at all comes from it in the journal, not even the
+  power lines, and `py-spy dump` (below) shows the main thread inside `SoapySDR.Device`.
+* **The database refuses writes.** An `sqlite3.OperationalError` in the main loop (a lock held too
+  long, a full SD card, an I/O error) skips the rest of the tick, the heartbeat included. It is
+  logged as `database error in the main loop: <error> (N failed tick(s) in a row ...)`, at most once a
+  minute, and `database: writable again after N failed tick(s)` when it clears. A command's answer
+  that could not be written is written at the next tick, so the command does not stay `taken`.
+* **The daemon died or was restarted mid-command.** At start, holding the lock, the daemon marks
+  every `taken` command failed ("the daemon that took this command stopped or hung before answering
+  it") and expires `pending` commands older than `daemon.pending_command_max_age_s` (300 s; 0 keeps
+  them), so a campaign asked for an hour ago does not start by itself after a restart. The journal
+  line starts `command queue:`. Clearing rows by hand is no longer needed.
+
+What the CLI says:
+
+* `<kind>: the daemon took command #N but has not answered in 30 s. It may be stuck in the receiver
+  driver: see mapper status and journalctl -u dmr-mapper`: the daemon claimed the command and is
+  still working on it, or is stuck. `... is still waiting: the daemon has not taken it` means the
+  main loop is not reaching the queue at all.
+* `error: the daemon (pid N) is running but its heartbeat is stale (last one N s ago, it last said:
+  ...)`: no heartbeat, but a process holds `<db>.daemon.lock` (a flock, so the kernel drops it when the
+  process dies and the holder is alive). `mapper survey|decode|watch|campaign` then exits without
+  posting anything or starting a temporary daemon, and `mapper stop`/`approve` refuse the same way.
+  `mapper status` prints `daemon: STALE: ...` and lists the commands still `pending` or `taken`;
+  `mapper doctor` marks the daemon BAD.
+
+To see where a stuck daemon is blocked: `sudo py-spy dump --pid N` if py-spy is installed, or
+`sudo cat /proc/N/task/*/wchan; echo` for the kernel side. Then `journalctl -u dmr-mapper -n 100`
+and, for the SDRplay service, `journalctl -u sdrplay -n 50` (the unit name depends on how the API
+was installed).
 
 ## 8. Restoring from a snapshot
 
