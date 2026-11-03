@@ -203,8 +203,8 @@ CREATE TABLE carriers (
   id                  INTEGER PRIMARY KEY,
   freq_hz             INTEGER NOT NULL UNIQUE,
   band                TEXT,                 -- survey band name from config, or NULL
-  first_seen          INTEGER NOT NULL,
-  last_seen           INTEGER NOT NULL,
+  first_seen          INTEGER NOT NULL,     -- when DMR was first / last heard (bursts, key-ups);
+  last_seen           INTEGER NOT NULL,     --   0 = never heard (only listened to). See §12.
   dominant_cc         INTEGER,              -- colour code 0-15, NULL if unknown
   variant             TEXT NOT NULL DEFAULT 'unknown',  -- tier2|capplus|conplus|tier3|xpt|unknown
   variant_confidence  REAL NOT NULL DEFAULT 0,
@@ -825,6 +825,22 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   (the misleading print kept in `printed_as`) and only feeds the low-weight `identity_slco`: by
   design (§6). DSD-FME's `Net ID: 2`, sub-site 4 on 456.85 MHz is the on-air net 1 site 3: the
   numbering rule of §6 ("Tier III numbering"), not an unexplained offset.
+
+- **`last_seen` meant "last listened to", fixed 2026-11-03** (`tests/test_last_seen.py`). In decode
+  session 14 of the field campaign, 469.0625, 469.35, 456.85, 456.9125, 469.4625 and 469.8 MHz gave
+  20 lines, 0 syncs and a level at the noise floor (about -25 dB) in 120 s each, yet status and
+  `systems.txt` showed them `last 2026-11-03`: the live ingest (and the offline ingest of a log, at
+  the log's start time) called `upsert_carrier(freq, now)` before reading a line. So a carrier that
+  had gone silent never left the scheduler's 30-day target list, and the watch kept it as known.
+  Now `Store.carrier_id` creates or finds the carrier without touching its seen range (a new one is
+  stored with `first_seen = last_seen = 0`, "never heard": the columns stay `NOT NULL`, and the TUI,
+  the map and MCP already show 0 as none). Only RF evidence moves the range: decoded DMR, at the
+  times of its bursts and messages (`IngestStats.heard_first_ts` / `heard_last_ts`), and a key-up of
+  the watch (`upsert_carrier`). Another protocol's sync does not count: the Cap+ sample ends with a
+  false D-STAR sync on noise 152 s after its last DMR burst, which used to be its `last_seen`. The
+  correlator skips 0 when it dates sites and evidence (`context.earliest`); `mapper status` prints
+  "never heard". Carriers stored before the fix keep the date of their last silent decode until DMR
+  is heard on them again.
 
 - **Faults from the same review, fixed 2026-11-02** (`tests/test_review_1031_fixes.py`, `tests/test_watch.py`).
   - Watch: `decoded` meant "a decoder was assigned during the key-up", not "DMR came out" (108 of 116

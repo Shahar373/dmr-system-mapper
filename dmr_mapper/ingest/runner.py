@@ -90,8 +90,9 @@ def ingest_lines(
         raise ValueError("carrier frequency is required (use --freq or a dsd_fme_<freqHz>_<date>_<time>.log name)")
     ctx.start_time = _localise(ctx.start_time, ctx.tz)
     now = int(time.time())
-    seen_at = int(ctx.start_time.timestamp()) if ctx.start_time else now
-    carrier_id = store.upsert_carrier(ctx.freq_hz, seen_at, _band_for(cfg, ctx.freq_hz))
+    # a log with no DMR in it does not refresh the carrier: the seen range moves only with decoded
+    # DMR, at the times of its bursts (Aggregator.flush), not at the log's start time
+    carrier_id = store.carrier_id(ctx.freq_hz, _band_for(cfg, ctx.freq_hz))
     run_id = store.start_ingest_run(ctx.source, path, carrier_id, now, fingerprint)
     stats = IngestStats(source=ctx.source, path=path, freq_hz=ctx.freq_hz, carrier_id=carrier_id)
     agg = Aggregator(store, carrier_id, ctx.source, _bucket_minutes(cfg), stats, seconds_observed)

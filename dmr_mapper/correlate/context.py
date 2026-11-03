@@ -10,6 +10,12 @@ from typing import Any
 from ..db import Store
 
 
+def earliest(*ts: int) -> int:
+    """The earliest of carrier ``first_seen`` values; 0 ("never heard") is no time and is skipped."""
+    real = [t for t in ts if t and t > 0]
+    return min(real) if real else 0
+
+
 @dataclass(slots=True)
 class CarrierInfo:
     id: int

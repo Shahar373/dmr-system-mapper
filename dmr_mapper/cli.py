@@ -70,7 +70,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("carriers:")
         for c in store.carriers():
             print(f"  {c['freq_hz'] / 1e6:10.4f} MHz  cc={c['dominant_cc']}  variant={c['variant']} ({c['variant_confidence']:.2f})"
-                  f"  seen {datetime.fromtimestamp(c['first_seen'], tz=timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(c['last_seen'], tz=timezone.utc):%Y-%m-%d}")
+                  + (f"  seen {datetime.fromtimestamp(c['first_seen'], tz=timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(c['last_seen'], tz=timezone.utc):%Y-%m-%d}"
+                     if c["last_seen"] else "  never heard (listened to, no DMR)"))
     return 0
 
 

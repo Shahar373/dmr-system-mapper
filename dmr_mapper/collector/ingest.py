@@ -19,7 +19,8 @@ class CarrierIngest:
         self.store = store
         self.freq_hz = freq_hz
         now = int(time.time())
-        self.carrier_id = store.upsert_carrier(freq_hz, now, _band_for(cfg, freq_hz))
+        # listening is not hearing: the seen range moves only with decoded DMR (Aggregator.flush)
+        self.carrier_id = store.carrier_id(freq_hz, _band_for(cfg, freq_hz))
         self.run_id = store.start_ingest_run(source, None, self.carrier_id, now, None)
         ctx = ParseContext(freq_hz=freq_hz, start_time=datetime.now(tz=tz), source=source, time_is_rf=True, tz=tz)
         self.stats = IngestStats(source=source, path=None, freq_hz=freq_hz, carrier_id=self.carrier_id)
