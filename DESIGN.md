@@ -839,8 +839,15 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   the watch (`upsert_carrier`). Another protocol's sync does not count: the Cap+ sample ends with a
   false D-STAR sync on noise 152 s after its last DMR burst, which used to be its `last_seen`. The
   correlator skips 0 when it dates sites and evidence (`context.earliest`); `mapper status` prints
-  "never heard". Carriers stored before the fix keep the date of their last silent decode until DMR
-  is heard on them again.
+  "never heard". Carriers stored before the fix are repaired once with `mapper repair-seen`
+  (`dmr_mapper/db/repair.py`, `tests/test_repair_seen.py`; `--dry-run` shows the changes first). It
+  recomputes the range from what was heard: observation buckets with DMR bursts (never pruned; to
+  the end of the bucket, so `last_seen` may be up to `ingest.bucket_minutes` late), structural
+  events, rest transitions and key-ups. It only takes back what listening added (`last_seen` moves
+  back, `first_seen` forward); a carrier with none of that becomes 0 / 0; a value older than
+  `retention.keyup_days` is left, since it may rest on a key-up that is gone. Running it again
+  changes nothing. Sites follow at the next `mapper correlate`; evidence dates (`observed_at` only
+  grows) need `mapper correlate --rebuild`.
 
 - **Faults from the same review, fixed 2026-11-02** (`tests/test_review_1031_fixes.py`, `tests/test_watch.py`).
   - Watch: `decoded` meant "a decoder was assigned during the key-up", not "DMR came out" (108 of 116
