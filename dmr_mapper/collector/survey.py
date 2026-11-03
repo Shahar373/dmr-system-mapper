@@ -12,6 +12,7 @@ import numpy as np
 from scipy import fft as sfft
 
 from ..db import Store
+from .hits import distance_km, latest_hits, plan_radius_km, plan_window_s, recent_hits, run_position  # noqa: F401 (re-exported)
 from .sdr import IQSource
 
 
@@ -160,21 +161,63 @@ def record(store: Store, band: str, started: int, hits: list[SurveyHit], device:
     return run_id
 
 
-def latest_hits(store: Store, max_age_s: int | None = None) -> list[dict[str, Any]]:
-    """Hits of the most recent run per band (optionally only runs younger than ``max_age_s``)."""
-    runs = store.rows("SELECT id, band, started FROM survey_runs ORDER BY started DESC, id DESC")
-    seen_band: set[str] = set()
-    out: list[dict[str, Any]] = []
-    now = int(time.time())
-    for r in runs:
-        if r["band"] in seen_band:
-            continue
-        if max_age_s is not None and now - int(r["started"]) > max_age_s:
-            continue
-        seen_band.add(r["band"])
-        for h in store.rows("SELECT * FROM survey_hits WHERE run_id = ? ORDER BY freq_hz", (r["id"],)):
-            d = dict(h)
-            d["band"] = r["band"]
-            d["run_started"] = r["started"]
-            out.append(d)
-    return sorted(out, key=lambda d: d["freq_hz"])
+MAX_SWEEPS = 20
+
+
+def max_dwell_s(cfg: dict[str, Any]) -> float:
+    """The longest dwell per step at which a carrier 3 dB over the gate, transmitting during one
+    segment only, still clears the gate.
+
+    The hit test is the 95th percentile of the per-segment channel power (``np.percentile``,
+    linear interpolation): the more segments a dwell holds, the less one loud segment weighs, and
+    from 21 segments on it does not count at all. With the defaults (1 s segments, 9 dB gate) this
+    is 11 s; a longer dwell would lose short transmissions of weak carriers."""
+    scfg = cfg.get("survey", {}) or {}
+    segment = float(scfg.get("segment_s", 1))
+    thr = float(scfg.get("snr_threshold_db", 9))
+    loud = 10 ** ((thr + 3) / 10)
+    n = 1
+    while n < 200:
+        v = np.ones(n + 1)
+        v[0] = loud
+        if 10 * np.log10(np.percentile(v, 95)) < thr:
+            break
+        n += 1
+    return n * segment
+
+
+def check_survey_params(params: dict[str, Any], cfg: dict[str, Any]) -> tuple[float, int]:
+    """(dwell per step, number of sweeps) a survey session will use; raises ValueError for values
+    the hit test cannot honour. ``dwell_s`` in the params overrides ``survey.dwell_s`` for that
+    session only."""
+    scfg = cfg.get("survey", {}) or {}
+    dwell = params.get("dwell_s")
+    if dwell is None:
+        dwell = float(scfg.get("dwell_s", 3))
+    else:
+        dwell = float(dwell)
+        segment = float(scfg.get("segment_s", 1))
+        top = max_dwell_s(cfg)
+        if not segment <= dwell <= top:
+            raise ValueError(f"dwell must be between {segment:g} and {top:g} s per step: longer, the p95 test over"
+                             f" {segment:g} s segments loses short transmissions of weak carriers")
+    sweeps = 1 if params.get("sweeps") is None else int(params["sweeps"])
+    if not 1 <= sweeps <= MAX_SWEEPS:
+        raise ValueError(f"sweeps must be between 1 and {MAX_SWEEPS}")
+    return dwell, sweeps
+
+
+def sweep_seconds(bands: list[dict[str, Any]], sample_rate: float, usable_fraction: float, dwell_s: float) -> float:
+    """Roughly how long one sweep of these bands takes (dwell plus the settle read after a retune)."""
+    steps = sum(len(step_centres(int(b["start_hz"]), int(b["stop_hz"]), sample_rate, usable_fraction)) for b in bands)
+    return steps * (dwell_s + 0.1)
+
+
+def sweeps_that_fit(requested: int, sweep_s: float, total_s: float) -> int:
+    """How many sweeps a survey followed by a decode runs: as many as asked for while they leave at
+    least half of the one budget to the decode, and always the first."""
+    if sweep_s <= 0:
+        return requested
+    return max(1, min(requested, int((total_s / 2) // sweep_s)))
+
+

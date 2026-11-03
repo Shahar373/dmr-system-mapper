@@ -23,7 +23,7 @@ from textual.containers import Horizontal, Vertical
 from textual.widgets import Button, DataTable, Footer, Header, Input, Label, RichLog, Static, TabbedContent, TabPane, Tree
 
 from ..collector import state as st
-from ..collector.survey import latest_hits
+from ..collector.hits import plan_window_s, recent_hits
 from ..correlate.names import display, set_name
 from ..db import Store
 
@@ -83,7 +83,7 @@ class StatusBar(Static):
             el, bu = pr.get("elapsed_s"), pr.get("budget_s")
             tail = f"  {el}/{bu} s" if el is not None and bu else ""
             if s.mode == "survey":
-                line2 = f"survey #{s.session_id}: {pr.get('band', '')} step {pr.get('step', '?')}/{pr.get('steps', '?')} at {_mhz(pr.get('center_hz'))} MHz, {pr.get('hits', 0)} hits so far{tail}"
+                line2 = f"survey #{s.session_id}: {('sweep ' + str(pr['sweep']) + '/' + str(pr['sweeps']) + ', ') if (pr.get('sweeps') or 1) > 1 else ''}{pr.get('band', '')} step {pr.get('step', '?')}/{pr.get('steps', '?')} at {_mhz(pr.get('center_hz'))} MHz, {pr.get('hits', 0)} hits so far{tail}"
             elif s.mode == "watch":
                 mark = {"pinned": "[b]CC[/]", "decoding": "[green]dec[/]", "waiting": "[yellow]wait[/]"}
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} {mark.get(c.get('state'), '')} {c.get('snr_db') if c.get('snr_db') is not None else '?'} dB"
@@ -93,6 +93,10 @@ class StatusBar(Static):
             else:
                 cs = ", ".join(f"{_mhz(c['freq_hz'])} ({c.get('syncs', 0)} syncs)" for c in pr.get("carriers", []))
                 line2 = f"decode #{s.session_id}: slice {pr.get('slice', '?')}/{pr.get('slices', '?')} ({pr.get('reason', '')}) {pr.get('slice_elapsed_s', 0)}/{pr.get('dwell_s', '?')} s: {cs}{tail}"
+        if s.mode in ("survey", "decode", "watch") and pr.get("campaign"):
+            c = pr["campaign"]
+            left = max(0, int(c["deadline"]) - int(datetime.now(tz=timezone.utc).timestamp()))
+            line2 += f"   [b]campaign[/] cycle {c['cycle']}/{c['cycles']}, {left // 60} min left"
         if s.mode in ("survey", "decode", "watch"):
             g = pr.get("gps")
             line2 += f"\nGPS {g['lat']:.5f}, {g['lon']:.5f} ({g['fix']})" if g else f"\nGPS: no fix ({pr.get('gps_source', '?')})"
@@ -111,7 +115,7 @@ class MapperApp(App[None]):
     """
     BINDINGS = [
         Binding("a", "auto", "Survey+Decode"), Binding("s", "survey", "Survey"), Binding("d", "decode", "Decode"),
-        Binding("w", "watch", "Watch"), Binding("x", "stop", "Stop"),
+        Binding("w", "watch", "Watch"), Binding("m", "campaign", "Campaign"), Binding("x", "stop", "Stop"),
         Binding("c", "correlate", "Correlate"), Binding("e", "export", "Export"), Binding("n", "name", "Name"), Binding("r", "refresh", "Refresh"),
         Binding("y", "approve", "Approve Claude"), Binding("v", "refuse", "Refuse Claude"), Binding("q", "quit", "Quit"),
     ]
@@ -142,6 +146,7 @@ class MapperApp(App[None]):
                 yield Button("Survey (s)", id="survey", variant="primary")
                 yield Button("Decode (d)", id="decode", variant="primary")
                 yield Button("Watch slice (w)", id="watch", variant="primary")
+                yield Button("Campaign (m)", id="campaign", variant="primary")
                 yield Button("Stop (x)", id="stop", variant="error")
                 yield Button("Correlate (c)", id="correlate")
                 yield Button("Export map (e)", id="export")
@@ -166,7 +171,7 @@ class MapperApp(App[None]):
         t = self.query_one("#carriers", DataTable)
         t.add_columns("MHz", "variant", "conf", "CC", "site", "system", "last seen", "decoded s", "bursts")
         t = self.query_one("#hits", DataTable)
-        t.add_columns("MHz", "band", "SNR dB", "p95", "occ %", "width", "class", "run")
+        t.add_columns("MHz", "band", "SNR dB", "p95", "occ %", "width", "class", "heard")
         t = self.query_one("#sessions", DataTable)
         t.add_columns("#", "kind", "status", "by", "budget", "started", "elapsed", "summary")
         self.refresh_all()
@@ -209,11 +214,11 @@ class MapperApp(App[None]):
     def _refresh_hits(self) -> None:
         assert self.store is not None
         t = self.query_one("#hits", DataTable)
-        hits = latest_hits(self.store)
+        hits = recent_hits(self.store, plan_window_s(self.cfg))
         self._fill(t, [(
             _mhz(h["freq_hz"]), h["band"], f"{h['snr_db']:.1f}" if h["snr_db"] is not None else "-",
             f"{h['p95_snr_db']:.1f}" if h["p95_snr_db"] is not None else "-", f"{h['occupancy_pct']:.0f}" if h["occupancy_pct"] is not None else "-",
-            f"{h['width_hz']:.0f}" if h["width_hz"] else "-", h["class"] or "-", _ago(h["run_started"])) for h in hits],
+            f"{h['width_hz']:.0f}" if h["width_hz"] else "-", h["class"] or "-", f"{h.get('heard_in', 1)}/{h.get('sweeps', 1)}, {_ago(h['run_started'])}") for h in hits],
             [str(h["freq_hz"]) for h in hits])
 
     def _refresh_systems(self) -> None:
@@ -330,6 +335,13 @@ class MapperApp(App[None]):
             params["budget_s"] = b
         self._post("start_watch", params)
 
+    def action_campaign(self) -> None:
+        """Survey, decode and watch in cycles at this stop, for the whole budget."""
+        params: dict[str, Any] = {}
+        if (b := self._budget_s()) is not None:
+            params["budget_s"] = b
+        self._post("start_campaign", params)
+
     def action_name(self) -> None:
         if self._selected is None:
             self.query_one("#log", RichLog).write("[yellow]select a system or site on the Systems tab first[/]")
@@ -401,7 +413,7 @@ class MapperApp(App[None]):
 
     @on(Button.Pressed)
     def _button(self, event: Button.Pressed) -> None:
-        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "watch": self.action_watch, "stop": self.action_stop,
+        action = {"auto": self.action_auto, "survey": self.action_survey, "decode": self.action_decode, "watch": self.action_watch, "campaign": self.action_campaign, "stop": self.action_stop,
                   "correlate": self.action_correlate, "export": self.action_export}.get(event.button.id or "")
         if action:
             action()

@@ -32,12 +32,13 @@ from . import state as st
 from .bridge import PcmServer
 from .channelizer import AUDIO_RATE, Channelizer
 from .decoder import DecoderProcess, find_dsd_fme
+from . import campaign as camp_mod
 from .gps import NoGps, open_gps
 from .ingest import CarrierIngest
 from .power import PowerState, budget_for, read_power
 from .scheduler import Slice, plan, targets_from_store
 from .sdr import Backend, SdrStatus, guess_holder, make_backend
-from .survey import latest_hits, record, sweep
+from .survey import check_survey_params, plan_radius_km, plan_window_s, recent_hits, record, sweep, sweep_seconds
 from .watch import InstancePlanner, KeyupDetector, ListenLog, plan_watch, watch_cfg, watch_instances
 
 
@@ -232,7 +233,7 @@ class Daemon:
     def _handle(self, cmd: dict[str, Any]) -> tuple[bool, str] | None:
         assert self._store is not None
         kind, params = cmd["kind"], cmd.get("params") or {}
-        if kind in ("start_survey", "start_decode", "start_watch"):
+        if kind in ("start_survey", "start_decode", "start_watch", "start_campaign"):
             mcp_timeout = int(float((self.cfg.get("mcp", {}) or {}).get("approval_timeout_min", 10)) * 60) + 120
             if cmd.get("source") == "mcp" and time.time() - int(cmd.get("created") or 0) > mcp_timeout:
                 # asked for by Claude long ago (the daemon was down): the place and the question have moved on
@@ -243,8 +244,24 @@ class Daemon:
                 self.session_thread.join(timeout=30)
             if self.session_thread is not None and self.session_thread.is_alive():
                 return False, f"a {self.session_kind} session is already running (#{self.session_id}); stop it first"
-            if kind in ("start_decode", "start_watch") and find_dsd_fme(self.cfg) is None:
+            if kind in ("start_decode", "start_watch", "start_campaign") and find_dsd_fme(self.cfg) is None:
                 return False, "dsd-fme not found (decode.dsd_fme_bin)"
+            if kind == "start_campaign":
+                # a campaign is a chain of ordinary sessions: it starts as the survey of its first cycle
+                try:
+                    if params.get("dwell_s") is not None:
+                        check_survey_params({"dwell_s": params["dwell_s"]}, self.cfg)
+                    first_budget = int(params.get("budget_s") or budget_for(read_power(self.cfg), self.cfg)[1])
+                    camp = camp_mod.new_campaign(first_budget, self.cfg, dwell_s=params.get("dwell_s"),
+                                                 watch=bool(params.get("watch", True)))
+                except (TypeError, ValueError) as exc:
+                    return False, str(exc)
+                kind, params = camp_mod.survey_step(camp, self.cfg)
+            if kind == "start_survey":
+                try:      # a dwell the hit test cannot honour is a refusal, before the receiver is touched
+                    check_survey_params(params, self.cfg)
+                except (TypeError, ValueError) as exc:
+                    return False, str(exc)
             self.sdr = self._probe()
             self._last_probe = self._last_full_probe = time.monotonic()
             if self.sdr.status != "present":
@@ -277,6 +294,9 @@ class Daemon:
             self._closing.clear()
             self._stop_reason = None
             self.progress = {"kind": session_kind, "phase": "starting"}
+            if params.get("campaign"):
+                c = params["campaign"]
+                self.progress["campaign"] = {"cycle": c["cycle"], "cycles": c["cycles"], "step": c["step"], "deadline": c["deadline"]}
             self.message = f"{session_kind} session #{sid} started ({budget // 60} min budget, {self.power.short()})"
             self.session_thread = threading.Thread(target=self._session_main, args=(sid, session_kind, params, budget, source),
                                                    name=f"session-{sid}", daemon=True)
@@ -425,6 +445,17 @@ class Daemon:
             from ..correlate import run as correlate
             rep = correlate(store, self.cfg)
             summary["correlate"] = {"links": rep.links_scored, "by_label": rep.links_by_label, "sites": rep.sites, "systems": rep.systems}
+        if (params.get("campaign") and "error" not in summary and not self.session_stop.is_set()
+                and not self.stop_event.is_set()):
+            pos = summary.get("position_end") or None
+            near = (float(pos["lat"]), float(pos["lon"])) if pos else None
+            step = camp_mod.next_step(store, self.cfg, params["campaign"], kind, near=near)
+            if step is None:
+                summary["campaign_done"] = True
+                st.post_command(store, "daemon", "export", {})
+            else:
+                st.post_command(store, "daemon", step[0], step[1])
+                summary["campaign_next"] = st.describe_request(step[0], step[1])
         if (kind == "survey" and params.get("then_decode") and "error" not in summary
                 and not self.session_stop.is_set() and not self.stop_event.is_set()):
             # one button, one budget: the decode gets what the survey left over
@@ -447,32 +478,71 @@ class Daemon:
             bands = [band_for_range(bands, int(params["range"]["start_hz"]), int(params["range"]["stop_hz"]))]
         if not bands:
             raise ValueError("no survey bands configured (survey.bands)")
-        summary["bands"] = {}
-        scfg = dict(self.cfg.get("survey", {}) or {})
-        for band in bands:
+        dwell, sweeps = check_survey_params(params, self.cfg)
+        scfg = {**(self.cfg.get("survey", {}) or {}), "dwell_s": dwell}
+        cfg = {**self.cfg, "survey": scfg}           # this session's dwell; the configured one is untouched
+        usable = float((self.cfg.get("sdr", {}) or {}).get("usable_fraction", 0.8))
+        summary.update(dwell_s=dwell, sweeps_planned=sweeps,
+                       sweep_s_estimate=round(sweep_seconds(bands, source.sample_rate, usable, dwell)), bands={}, sweeps=[])
+        heard: set[int] = set()
+        # one budget for a survey and the decode after it: a further sweep starts only while it
+        # leaves at least half of that budget to the decode (the first always runs)
+        total = int(params.get("total_budget_s") or budget_s) if params.get("then_decode") else 0
+        took: list[float] = []
+        for n in range(1, sweeps + 1):
             self._check(t0, budget_s)
-            started = int(time.time())
+            if total and n > 1:
+                need = max(float(summary["sweep_s_estimate"]), max(took))
+                if time.monotonic() - t0 + need > total / 2:
+                    summary["sweeps_skipped"] = sweeps - n + 1
+                    summary["sweeps_note"] = (f"{n - 1} of {sweeps} sweeps: another one ({need / 60:.1f} min) would leave the decode"
+                                       f" less than half of the {total // 60} min")
+                    break
+            sweep_t0 = time.monotonic()
+            this: dict[str, int] = {}
+            for band in bands:
+                self._check(t0, budget_s)
+                started = int(time.time())
 
-            def progress(p: dict[str, Any]) -> None:
-                self._set_progress(phase="sweeping", elapsed_s=int(time.monotonic() - t0), budget_s=budget_s, **p, **self._gps_progress())
-                if time.monotonic() - self._last_track_flush >= 30:
-                    self._session_track += self._flush_track(store, self.session_id or 0)
+                def progress(p: dict[str, Any]) -> None:
+                    self._set_progress(phase="sweeping", sweep=n, sweeps=sweeps, elapsed_s=int(time.monotonic() - t0), budget_s=budget_s,
+                                       **p, **self._gps_progress())
+                    if time.monotonic() - self._last_track_flush >= 30:
+                        self._session_track += self._flush_track(store, self.session_id or 0)
 
-            def here() -> tuple[float, float] | None:
-                f = self.gps.fix()
-                return (f.lat, f.lon) if f else None
+                def here() -> tuple[float, float] | None:
+                    f = self.gps.fix()
+                    return (f.lat, f.lon) if f else None
 
-            def stop() -> bool:
-                try:
-                    self._check(t0, budget_s)
-                except SessionStop:
-                    return True
-                return False
+                cut: list[BaseException] = []
 
-            hits = sweep(source, band, self.cfg, stop=stop, progress=progress, position=here)
-            run_id = record(store, str(band.get("name")), started, hits, source.describe(), {k: v for k, v in scfg.items() if k != "bands"})
-            summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits), "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
-            self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
+                def stop() -> bool:
+                    try:
+                        self._check(t0, budget_s)
+                    except (SessionStop, BudgetDone) as exc:
+                        cut.append(exc)      # record what this band's sweep heard so far, then end the session
+                        return True
+                    return False
+
+                hits = sweep(source, band, cfg, stop=stop, progress=progress, position=here)
+                settings = {k: v for k, v in scfg.items() if k != "bands"}
+                if sweeps > 1:
+                    settings["sweep"] = f"{n}/{sweeps}"
+                if cut:
+                    settings["partial"] = True
+                run_id = record(store, str(band.get("name")), started, hits, source.describe(), settings)
+                heard.update(h.freq_hz for h in hits)
+                this[str(band.get("name"))] = len(hits)
+                summary["bands"][str(band.get("name"))] = {"run_id": run_id, "hits": len(hits),
+                                                           "top": [h.to_dict() for h in sorted(hits, key=lambda h: -h.snr_db)[:10]]}
+                self._set_progress(phase="band done", band=band.get("name"), hits=len(hits))
+                if cut:
+                    summary["sweeps"].append({"sweep": n, "seconds": round(time.monotonic() - sweep_t0), "hits": this, "partial": True})
+                    summary["distinct_hits"] = len(heard)
+                    raise cut[0]
+            took.append(time.monotonic() - sweep_t0)
+            summary["sweeps"].append({"sweep": n, "seconds": round(took[-1]), "hits": this})
+            summary["distinct_hits"] = len(heard)
 
     # -- decode ------------------------------------------------------------------------------------
     def _decode(self, store: Store, source: Any, params: dict[str, Any], budget_s: int, t0: float, summary: dict[str, Any]) -> None:
@@ -485,9 +555,23 @@ class Daemon:
         summary["carriers"] = {}
         summary["slices"] = []
         rounds = 0
+        radius = plan_radius_km(self.cfg)
+        if radius and not only:
+            # the plan follows the receiver: sweeps made at an earlier stop are left out. A fresh
+            # session's GPS may need a moment for its first fix.
+            deadline = time.monotonic() + 5
+            while self.gps.fix() is None and not isinstance(self.gps, NoGps) and time.monotonic() < deadline:
+                self._check(t0, budget_s)
+                time.sleep(0.25)
         while True:
             self._check(t0, budget_s)
-            hits = latest_hits(store, max_age_s=7 * 86400)
+            f = self.gps.fix() if radius and not only else None
+            here = (f.lat, f.lon) if f else None
+            far: list[int] = []
+            hits = recent_hits(store, plan_window_s(self.cfg), max_age_s=7 * 86400, near=here, radius_km=radius, far_runs=far)
+            summary["plan"] = ({"position": [round(here[0], 5), round(here[1], 5)], "radius_km": radius, "far_sweeps_left_out": len(far)}
+                               if here else {"position": None, "note": "no GPS fix: sweeps from every place count" if radius and not only else
+                                             "plan_radius_km 0 or carriers given: sweeps from every place count"})
             targets = targets_from_store(store, self.cfg, hits, only_freqs=only or None)
             if not targets:
                 summary["note"] = "no carriers to decode: run a survey first"

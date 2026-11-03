@@ -56,7 +56,8 @@ def export_all(store: Store, cfg: dict[str, Any], out_dir: Path | None = None, m
     out.mkdir(parents=True, exist_ok=True)
     g = build(store, min_label=min_label)
     html, js, gml, txt = out / "map.html", out / "map.json", out / "map.graphml", out / "systems.txt"
-    write(g, str(html))
+    from .coverage import coverage
+    write(g, str(html), coverage=coverage(store, cfg))
     js.write_text(json.dumps(to_json(g), indent=2), encoding="utf-8")
     write_graphml(g, str(gml))
     _, text = systems_report(store, min_label)

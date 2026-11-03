@@ -89,8 +89,26 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
 - **Survey**: steps of `sample_rate × usable_fraction` (1.6 MHz at 2 MS/s), Welch PSD per
   `segment_s`, channel power on the raster, noise floor = median channel, hit when the 95th
   percentile SNR clears `snr_threshold_db`; neighbours of a strong carrier are suppressed.
-  Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`).
-- **Decode**: the scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
+  Hits go to `survey_runs` / `survey_hits` (pruned after `daemon.survey_hits_keep_days`). A session may
+  sweep its bands several times (`sweeps`, one `survey_runs` row per band and sweep) and use its own
+  `dwell_s` (`mapper survey --sweeps N --dwell S`, MCP `scan_band`), checked by `check_survey_params`:
+  between `segment_s` and `max_dwell_s`, the longest dwell at which a carrier 3 dB over the gate that
+  transmits during one segment still clears the p95 gate (`np.percentile` interpolates linearly, so one
+  loud segment weighs less the more there are, and nothing from 21 on): 11 s with the defaults.
+  Seconds per step and sweep: dwell 3 s: 12 dB / 20 dB one-second burst read as 11.6 / 19.5 dB, sweep of
+  both default bands (53 steps) 2.7 min; 8 s: 10.3 / 18.2 dB, 7.2 min; 12 s: 8.9 (lost) / 16.6 dB, 10.7 min.
+  With `then_decode`, sweep n > 1 starts only if the elapsed time plus one sweep (the longer of the
+  estimate and the slowest so far) stays within half the one budget (`sweeps_skipped`, `sweeps_note`).
+  A sweep cut by the budget or a stop records what its band heard so far (`settings.partial`).
+- **Decode**: targets are the hits of the recent sweeps (`recent_hits`: per band name, the newest run
+  younger than 7 days and every run up to `survey.plan_window_minutes` (180) before it, merged per
+  frequency with the values of the strongest sweep, `heard_in` and `sweeps`) plus the carriers seen in
+  30 days. Before, only the newest run per band counted, so a second sweep hid what the first had heard.
+  With a GPS fix at the decode's start (up to 5 s are waited for one), runs whose mean hit position is
+  more than `survey.plan_radius_km` (3) away are left out first (`summary.plan.far_sweeps_left_out`);
+  runs without positions always count. Carriers already in the database are still targets wherever
+  they were heard (30 days): a decode after a drive tries them once, and those with no DMR score low.
+  The scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
   variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
   Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
   FFT channelizer (overlap-save, sample_rate/D per channel: 80 kHz at 2 MS/s, 7.5 kHz low-pass, discriminator, rational resampling to 48 kHz int16,
@@ -132,6 +150,18 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   (`block_ms_avg` / `block_ms_max` against the 100 ms budget). Polarity retry is not done in watch
   sessions.
 - **After a decode or watch session** the correlator runs (`daemon.correlate_after_decode`).
+- **Campaign** (Phase 6, `collector/campaign.py`, `mapper campaign`, console `m`): one budget for one stop as a
+  chain of ordinary sessions. `start_campaign` becomes the survey of cycle 1 with `params.campaign` (id, started,
+  deadline, cycles, cycle_s, cycle, step, dwell_s, watch, watched, watch_target); `_after_session` asks
+  `next_step` for the next command and posts it, or posts `export` when nothing fits (`campaign_done`). Cycles:
+  `round(budget / campaign.cycle_minutes)`; per cycle `campaign.mix` (survey 0.15, decode 0.50, watch 0.35):
+  sweeps = the survey share // one sweep (at least 1); the watch slice is chosen right after the survey
+  (`choose_watch`: Tier III network, else the window with most intermittent hits near the receiver, else the
+  busiest known slice; one whose centre is not within half a slice of one already watched first), and the
+  decode gets the cycle minus the watch share (all of it when there is no slice, or the watch share is under
+  `min_watch_s`). A cycle that ended early with time left starts the next one; the last one can be followed
+  by an extra cycle in the time left. The chain stops on a stop, undervoltage, a failure, or a refused step
+  (receiver taken), and needs dsd-fme from the start. The progress of every step carries `campaign`.
 - **One button** (`a` in the console, `mapper survey --then-decode`): a survey, then a decode
   session with whatever is left of the one budget. Sessions are short and random (driving, battery).
 - **GPS** (Phase 3c), read only while a session runs: gpsd when it is running (shared safely), else
@@ -631,6 +661,9 @@ def write(graph, path)                                      # single static HTML
 #                         channelizer.py, bridge.py (PCM→TCP), decoder.py, ingest.py, scheduler.py, power.py
 # dmr_mapper/tui/app.py   (Phase 3a)  Textual console
 # dmr_mapper/collector/watch.py (Phase 4)  plan_watch, KeyupDetector, InstancePlanner; Daemon._watch drives them
+# dmr_mapper/collector/hits.py (Phase 6)  recent_hits, run_position, distance_km (no numpy: export and MCP use it)
+# dmr_mapper/collector/campaign.py (Phase 6)  new_campaign, survey_step, next_step, choose_watch
+# dmr_mapper/export/coverage.py (Phase 6)  coverage(store, cfg, days): stops, sweeps, gaps, unheard sites
 # dmr_mapper/ingest/rawpdu.py   (Phase 4)  CRCs, CSBK / short-LC bit fields from DSD-FME's -Z bytes
 # dmr_mapper/correlate/evidence/capmax.py, correlate/names.py (Phase 4)
 # dmr_mapper/mcp/tools.py  (Phase 5)  MapperTools: every tool as a plain function over the store and the queue
@@ -696,15 +729,16 @@ known carrier within `raster_tolerance_hz`. Times are ISO 8601 in `timezone`.
 | `get_status` | – | daemon (mode, receiver, power, progress, message), last 5 sessions, requests awaiting approval, approval settings, DB counts and links by label, latest survey per band, snapshots, configured bands |
 | `list_carriers` | `band?, since_hours = 168, min_snr_db?, variant?, limit = 200` | carriers: variant, CC, first/last seen, decode seconds, bursts, key-ups, best SNR (survey or decode), site / system / LCN |
 | `get_fingerprint` | `freq, days = 7` | activity counters and CC histogram, event kinds with counts and their 3 most frequent payloads, talkgroups and (pseudonymous) radios, key-ups, decode runs, latest survey hit, unrecognized line patterns, links |
-| `list_survey_hits` | `band?, run_id?, min_snr_db?, limit = 200` | hits of the latest run per band (or of one run) with the variant of the known carrier there |
+| `list_survey_hits` | `band?, run_id?, min_snr_db?, limit = 200` | hits of the recent sweeps per band, merged (`heard_in`, `sweeps`; or of one run) with the variant of the known carrier there |
+| `get_coverage` | `days = 7` | per stop: position, when, sweeps per band (full / partial, dwell), carriers heard, intermittent ones, decode / watch minutes, gaps; sites announced but never heard with the stop where their system was strongest |
 | `query_systems` | `system_id?, freq?, min_confidence = 0.3` | systems → sites → carriers (LCN, confidence), links among them with score, label, `tier2_only` |
 | `explain_link` | `link_id?` or `a_freq, b_freq, kind?` | `mapper explain` as JSON: every evidence row with raw, weight, decay, contribution, support, source, details |
 | `get_session` | `session_id?, request_id?, wait_s = 0` (≤ 55) | a session's state, params and summary (trimmed to ~24 KB), live progress while it runs; or what became of a request |
 | `propose_link` | `a_freq, b_freq, kind, confidence (0..1], note` | manual evidence with `source = mcp` (replaces Claude's earlier one for that link), rescored link |
 | `withdraw_proposal` | `a_freq, b_freq, kind?` | Claude's evidence removed, links rescored (deleted when nothing is left) |
 | `correlate_now` | – | through the daemon's `correlate` command when it runs, else in-process: the report |
-| `scan_band` | `band?, start?, stop?, minutes?, then_decode = false` | request: `{request_id, status, what, session_id?}`. `start..stop` must lie inside one configured band (`band_for_range`) |
-| `decode_carriers` | `freqs?, minutes?` | request (none: plan from the latest survey) |
+| `scan_band` | `band?, start?, stop?, minutes?, then_decode = false, dwell_s?, sweeps?` | request: `{request_id, status, what, session_id?}`. `start..stop` must lie inside one configured band (`band_for_range`) |
+| `decode_carriers` | `freqs?, minutes?` | request (none: plan from the recent sweeps) |
 | `watch_slice` | `freqs?, center?, minutes?` | request |
 | `stop_session` | – | the `stop` command's result |
 
@@ -936,6 +970,18 @@ DESIGN.md  CAPTURE.md  README.md  config.example.yaml  pyproject.toml
   "no DMR" and is revisited rarely). Watching is the way to hear it.
 - **Tier III channel numbering** without `Chan_Freq` needs a band plan (`survey.tier3_bandplans`)
   to convert LPCN to frequency; absent that, LPCN is stored and the link stays at `possible`.
+- **Intermittent carriers and the survey** (2026-11-02). A survey step listens 3 s, so a conventional
+  repeater that keys up once a minute for about 5 s (with its hang time) is caught by one sweep about
+  1 time in 8, by an 8 s step about 1 in 5, and by three 3 s sweeps about 1 in 3 (Poisson estimate,
+  1 - exp(-n (dwell + 5 s) / 60 s)). Several sweeps merged for planning beat one long dwell, which is
+  why `--sweeps` exists and the planner merges the recent sweeps. Neither catches a repeater that is
+  used a few times an hour: a watch session on its slice does. The window ignores where the receiver
+  was only when there is no GPS fix; with one, `survey.plan_radius_km` leaves the other stops' sweeps out.
+- **Coverage report** (Phase 6, `export/coverage.py`). Stops are survey runs grouped by the mean position of
+  their hits (greedy, first stop within `plan_radius_km`); runs without positions are one stop of their own.
+  Decode and watch minutes are assigned by `summary.position_end`. The unheard-site hint is the stop where a
+  member of the same system had its best survey SNR: where the system is strong, not where the missing site
+  is. The receiver's positions appear in map.html and in MCP, rounded to 4 decimals; no radio identity does.
 - **Sequential survey blind spots.** A rest hop whose destination carrier was not being decoded
   at that moment is simply not corroborated; behavioural evidence accumulates slowly and that is
   expected. A wideband channelizer is a later optimisation.

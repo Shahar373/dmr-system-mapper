@@ -63,7 +63,8 @@ def _fmt_ts(v: Any) -> str:
     return datetime.fromtimestamp(int(v), tz=timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
 
 
-def render(g: nx.Graph, title: str = "DMR network map", generated_at: int | None = None) -> str:
+def render(g: nx.Graph, title: str = "DMR network map", generated_at: int | None = None,
+           coverage: dict[str, Any] | None = None) -> str:
     width, height = 1100, 760
     pos = layout(g, width, height)
     data = to_json(g)
@@ -135,6 +136,9 @@ table{{border-collapse:collapse;width:100%}} td{{padding:2px 4px;vertical-align:
 .ev{{background:var(--raised);border-radius:6px;padding:6px 8px;margin:6px 0;font-size:12px}} .ev b{{color:var(--fg)}}
 .sys{{margin:4px 0;padding:4px 6px;border-left:3px solid var(--accent);background:var(--raised);border-radius:4px;cursor:pointer}}
 code{{font:12px ui-monospace,monospace;color:var(--fg)}}
+#coverage{{padding:12px 16px;border-top:1px solid var(--line);font-size:13px}} #coverage table{{width:auto;min-width:60%}}
+#coverage td,#coverage th{{padding:3px 8px;text-align:left;border-bottom:1px solid var(--line)}} #coverage th{{color:var(--muted);font-weight:normal}}
+#coverage .stop{{fill:var(--accent)}} #coverage .m{{color:var(--muted);font-size:12px}} .wrap{{overflow-x:auto}}
 @media (max-width:900px){{main{{grid-template-columns:1fr}} aside{{border-left:none;border-top:1px solid var(--line)}}}}
 </style></head>
 <body>
@@ -152,6 +156,7 @@ code{{font:12px ui-monospace,monospace;color:var(--fg)}}
 <h2>Systems</h2><div id="systems"></div>
 <p class="m" style="color:var(--muted);font-size:12px">Click a node for its details and the evidence behind each link.</p></div>
 </aside></main>
+{_coverage_html(coverage) if coverage else ""}
 <script>
 const DATA = {payload};
 const byId = Object.fromEntries(DATA.nodes.map(n => [n.id, n]));
@@ -194,8 +199,54 @@ renderSystems();
 """
 
 
-def write(g: nx.Graph, path: str, title: str = "DMR network map", generated_at: int | None = None) -> None:
+def _coverage_html(cov: dict[str, Any]) -> str:
+    """The coverage section: the stops as points by their coordinates (no map tiles, nothing fetched),
+    a table per stop, gaps, intermittent carriers, and the sites announced but never heard."""
+    e = html.escape
+    stops = cov.get("stops") or []
+    placed = [s for s in stops if s.get("position")]
+    svg = ""
+    if placed:
+        lats = [s["position"][0] for s in placed]
+        lons = [s["position"][1] for s in placed]
+        k = math.cos(math.radians(sum(lats) / len(lats)))
+        span = max(max(lats) - min(lats), (max(lons) - min(lons)) * k, 0.01)
+        w, h, pad = 360, 240, 24
+
+        def xy(lat: float, lon: float) -> tuple[float, float]:
+            return (pad + ((lon - min(lons)) * k / span) * (w - 2 * pad), h - pad - ((lat - min(lats)) / span) * (h - 2 * pad))
+
+        dots = "".join(
+            f'<g><circle class="stop" cx="{x:.1f}" cy="{y:.1f}" r="{5 + min(8, s["carriers_heard"] / 5):.1f}" fill-opacity="0.8">'
+            f'<title>stop {s["stop"]}: {s["carriers_heard"]} carriers</title></circle>'
+            f'<text class="lbl" x="{x:.1f}" y="{y - 10:.1f}" text-anchor="middle">{s["stop"]}</text></g>'
+            for s in placed for x, y in [xy(*s["position"])])
+        km = span * 111.2
+        svg = (f'<svg viewBox="0 0 {w} {h}" width="{w}" height="{h}" style="background:var(--raised);border-radius:6px">{dots}'
+               f'<text class="t2" x="{pad}" y="{h - 6}">{km:.1f} km across · north up</text></svg>')
+    rows = []
+    for s in stops:
+        bands = ", ".join(f"{e(b)} {v['full']}" + (f"+{v['partial']} partial" if v["partial"] else "")
+                          + (f" @{'/'.join(f'{d:g}' for d in v['dwell_s'])} s" if v["dwell_s"] else "") for b, v in s["bands"].items())
+        pos = f"{s['position'][0]:.4f}, {s['position'][1]:.4f}" if s.get("position") else "no position"
+        gaps = "; ".join(f"{e(g['band'])}: {e(g['why'])}" for g in s["gaps"]) or "-"
+        inter = ", ".join(f"{f / 1e6:.4f}" for f in s["intermittent"][:12]) + (" …" if len(s["intermittent"]) > 12 else "")
+        rows.append(f"<tr><td>{s['stop']}</td><td>{e(pos)}</td><td>{_fmt_ts(s['first'])} – {_fmt_ts(s['last'])}</td><td>{bands}</td>"
+                    f"<td>{s['carriers_heard']}</td><td>{inter or '-'}</td><td>{s['decode_min']:g} / {s['watch_min']:g}</td><td>{gaps}</td></tr>")
+    unheard = "".join(f"<li><b>{e(str(u['system'] or '?'))}</b>: {e(str(u['site'] or u['site_number']))} — {e(u['hint'])}</li>"
+                      for u in cov.get("unheard_sites") or [])
+    return (f'<section id="coverage"><h2>Coverage, last {cov.get("days", 7):g} days</h2>'
+            f'<p class="m">A stop is a place sweeps were made from (within {cov.get("radius_km", 3):g} km). Bands: full sweeps, partial ones'
+            f' and the dwell per step. Intermittent: heard in only some of the stop\'s sweeps, worth a watch. Gaps: a band never swept'
+            f' in full there, or only once.</p>{svg}'
+            f'<div class="wrap"><table><tr><th>stop</th><th>position</th><th>when</th><th>sweeps</th><th>carriers</th><th>intermittent</th>'
+            f'<th>decode / watch min</th><th>gaps</th></tr>{"".join(rows) or "<tr><td colspan=8>no sweeps in the window</td></tr>"}</table></div>'
+            f'<h2>Sites announced but never heard</h2><ul>{unheard or "<li>none</li>"}</ul></section>')
+
+
+def write(g: nx.Graph, path: str, title: str = "DMR network map", generated_at: int | None = None,
+          coverage: dict[str, Any] | None = None) -> None:
     from pathlib import Path
     p = Path(path)
     p.parent.mkdir(parents=True, exist_ok=True)
-    p.write_text(render(g, title, generated_at), encoding="utf-8")
+    p.write_text(render(g, title, generated_at, coverage), encoding="utf-8")

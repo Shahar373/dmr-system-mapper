@@ -65,7 +65,8 @@ investigation only.
 | 3b | Deployment: `dmr-mapper` systemd service, `deploy/deploy.sh` (pull, install, restart), nightly snapshot + export timer, read-only archive pull, size-capped raw debug logs, `mapper snapshot` / `export --all` | done (first install on the Pi pending) |
 | 3c | GPS track and position of every survey hit (gpsd, or the device when nobody else has it open), one-button survey+decode (`a`), radios' LRRP positions no longer kept, radio IDs and talkgroups kept 90 days (`mapper prune`) | done |
 | 4 | Capacity Max in depth: `mapper watch` (a whole slice, DSD-FME on the control channel and on every traffic channel when it keys up, with pre-roll), Cap Max channel updates and neighbour LCNs from DSD-FME's raw bytes, LCN learning, Activity Updates from `SLCO Completed Block`, one Tier III numbering whatever DSD-FME prints, `mapper name` for systems and sites | done, checked on air 2026-10-31 (the 469 MHz network: two sites and their LCNs, an unheard third site; DESIGN.md §12) |
-| 5 | `mapper serve-mcp`: MCP server (streamable HTTP on the Tailscale address, `dmr-mapper-mcp` service), 14 tools; Claude may look and propose, scans only with a person's approval (Claude Desktop's own tool prompt, a dialog in Claude Code, or `y` in the console / `mapper approve`); proposals never confirm a link by themselves; radio IDs as pseudonyms | done, used from Claude Desktop 2026-10-31 (a survey asked for by Claude, approved and read back) |
+| 5 | `mapper serve-mcp`: MCP server (streamable HTTP on the Tailscale address, `dmr-mapper-mcp` service), 14 tools (15 since Phase 6); Claude may look and propose, scans only with a person's approval (Claude Desktop's own tool prompt, a dialog in Claude Code, or `y` in the console / `mapper approve`); proposals never confirm a link by themselves; radio IDs as pseudonyms | done, used from Claude Desktop 2026-10-31 (a survey asked for by Claude, approved and read back) |
+| 6 | Field mapping: `survey --sweeps N --dwell S` (per session), decode planning from every recent sweep near the receiver (`survey.plan_window_minutes`, `plan_radius_km`), half the budget kept for the decode, cut sweeps kept; `mapper campaign` (console `m`): survey, decode and watch in cycles at one stop; coverage report (MCP `get_coverage`, section of map.html) | done offline (synthetic receiver); not yet on air |
 
 Each phase ends with a commit to `main` and waits for approval.
 
@@ -146,10 +147,12 @@ processes it can afford (fewer on battery).
 ```sh
 mapper doctor                      # what is installed, is the receiver there, power, database
 mapper daemon                      # foreground; systemd runs this in Phase 3b
-mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
+mapper tui                         # the console, over SSH: a survey+decode · s survey · d decode · w watch · m campaign · x stop · c correlate · e export · n name · y/v approve/refuse Claude · q quit
 mapper survey --minutes 10         # same from the shell; without a running daemon a temporary one is used
 mapper survey --band uhf --then-decode --minutes 20   # one budget for both
-mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the latest survey
+mapper survey --sweeps 3 --then-decode --minutes 50   # three sweeps, then decode what any of them heard (sweeps stop at half the budget)
+mapper survey --dwell 8                            # 8 s per step for this session only (about 7 min per sweep)
+mapper decode 168863000 168875000 --minutes 5   # specific carriers for 5 minutes (one dwell without --minutes), or none: plan from the recent sweeps
 mapper stop
 mapper status                      # now also shows the daemon and the last sessions
 mapper capture-iq --center 165000000 --seconds 11 --out /tmp/x.cf32   # dev tool: raw IQ for replay
@@ -163,7 +166,18 @@ mapper export --all              # map.html, map.json, map.graphml, systems.txt 
 mapper snapshot                  # consistent copy of the database in var/snapshots/ (nightly by timer)
 ```
 
-A decode session plans from the latest survey: carriers never decoded, strong, stale, or of a
+A decode session plans from the recent sweeps: every sweep of a band up to `survey.plan_window_minutes`
+(180) before its newest one, merged per frequency, so a conventional repeater that was quiet during the
+last sweep is still decoded if an earlier one heard it. Several short sweeps (`--sweeps N`) therefore
+catch an intermittent carrier more often than one long one: each sweep is another chance, and a
+transmission already under way when a step starts counts too. `--dwell S` changes the seconds per step for
+one session (default `survey.dwell_s`, 3: about 3 min per sweep of VHF 160-174 and UHF 400-470 MHz); it is
+refused above 11 s with the default 1 s segments and 9 dB gate, because the p95 test over more segments
+loses a weak carrier heard in one of them. With `--then-decode` a further sweep starts only while it leaves
+half of the one budget to the decode. With a GPS fix, sweeps made more than `survey.plan_radius_km` (3) from
+where the receiver is now are left out of the plan, so at the next stop the decode follows what is heard
+there. A sweep cut short by the end of the budget keeps what it heard (marked `partial`). The Survey tab shows in how many of the recent sweeps each hit
+was heard. Carriers never decoded, strong, stale, or of a
 variant that announces its identity come first, and carriers that look like the same Capacity Plus
 site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double dwell, because that is what
 produces rest-hop evidence. After a decode session the correlator runs. Closing the console never
@@ -209,6 +223,31 @@ mapper name site 469650000 Hilltop
 mapper name site 469650000 --clear
 mapper names
 ```
+
+## Usage (Phase 6): a campaign at each stop
+
+```sh
+mapper campaign --minutes 45          # one stop: survey (a few sweeps), decode, watch; 3 hours = 4 such cycles
+mapper campaign --minutes 180 --dwell 5
+mapper campaign --minutes 30 --no-watch
+mapper tui                            # m: a campaign with the console's budget; x stops it (the step running and the chain)
+```
+
+A campaign is a chain of ordinary sessions: when one ends, the daemon posts the next, as for
+`survey --then-decode`. Each cycle of about `campaign.cycle_minutes` (45) is a survey of as many
+sweeps as 15 % of it holds, a decode for half of it, and a watch for the rest. The slice to watch is
+the Tier III network with the most carriers, else the slice with the most carriers heard in only
+some of the recent sweeps (a conventional repeater, a traffic channel), else the busiest known one,
+one not watched yet first; with nothing worth watching the decode gets that time too. A stop,
+undervoltage or a failed step ends the chain; at the end the map is exported. The decode follows
+the receiver: with a GPS fix it plans only from sweeps made within `survey.plan_radius_km` (3 km), so
+at the next stop the previous stop's sweeps no longer count.
+
+Coverage: `get_coverage` (MCP) and a section at the bottom of `map.html` list per stop (a place sweeps
+were made from) when, how many full and partial sweeps per band at what dwell, the carriers heard
+there (strongest first, in how many sweeps), the intermittent ones, decode and watch minutes, the
+gaps (a band never swept in full there, or only once), and the sites announced on air but never
+heard, with the stop where their system was heard strongest: a hint where to listen, not a direction.
 
 ## Usage (Phase 5)
 

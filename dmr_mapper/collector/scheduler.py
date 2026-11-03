@@ -1,6 +1,6 @@
 """Decode planning: which carriers to decode together, in what order, for how long.
 
-Inputs are the latest survey hits plus the carriers already in the database. Each target gets a
+Inputs are the hits of the recent sweeps (``survey.recent_hits``) plus the carriers already in the database. Each target gets a
 score (never decoded, strong, stale, evidence-producing variant) and a group bonus when another
 target that looks like the same site fits in the same capture slice: decoding the carriers of
 one Capacity Plus site *together* is what produces rest-hop evidence, so those slices get a
