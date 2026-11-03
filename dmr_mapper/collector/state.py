@@ -198,9 +198,11 @@ def recent_commands(store: Store, limit: int = 20) -> list[dict[str, Any]]:
     return [dict(r) for r in store.rows("SELECT * FROM commands ORDER BY id DESC LIMIT ?", (limit,))]
 
 
-def sessions(store: Store, limit: int = 20) -> list[dict[str, Any]]:
+def sessions(store: Store, limit: int = 20, session_id: int | None = None) -> list[dict[str, Any]]:
+    """The newest ``limit`` sessions, newest first; with ``session_id``, only that one (if it exists)."""
     out = []
-    for r in store.rows("SELECT * FROM sessions ORDER BY id DESC LIMIT ?", (limit,)):
+    where, args = ("WHERE id = ? ", (int(session_id), limit)) if session_id is not None else ("", (limit,))
+    for r in store.rows(f"SELECT * FROM sessions {where}ORDER BY id DESC LIMIT ?", args):
         d = dict(r)
         d["params"] = json.loads(d["params"] or "{}")
         d["summary"] = json.loads(d["summary"] or "{}")

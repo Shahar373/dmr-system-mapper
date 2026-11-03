@@ -48,6 +48,7 @@ device directly, the mapper stays away from it and asks for gpsd, which shares o
 ```sh
 mapper tui                        # the console: a survey+decode, s survey, d decode, w watch, m campaign, x stop, c correlate, e export, n name, y/v approve/refuse Claude, q quit
 mapper status                     # one-shot summary
+mapper session                    # the latest session's full summary (sweeps, plan, carriers, errors); an id, --last N, --json
 mapper watch --minutes 20         # Capacity Max: one slice, the control channel and every traffic channel that keys up
 mapper campaign --minutes 45      # at a stop: survey, decode and watch in one budget (3 h = 4 cycles); the map is exported at the end
 journalctl -u dmr-mapper -f       # what the daemon is doing (sessions, refusals, receiver, power)
@@ -57,6 +58,11 @@ mapper doctor                     # everything at once, including the service an
 
 Closing the console never stops a session; sessions end by their time budget, by `x`, or on
 undervoltage.
+
+`mapper survey|decode|watch|campaign --no-wait` returns at once, and closing the terminal ends a
+`--wait` follower but not the session: `mapper session` shows what it did afterwards, the summary the
+follower prints at the end, in full (per-sweep seconds, `sweeps_note`, `then_decode_s`, the decode
+`plan`, `carriers`, `correlate`, `campaign_next`, errors). `--traceback` adds a failed session's traceback.
 
 ## 3. Updating
 
