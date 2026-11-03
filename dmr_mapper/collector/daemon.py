@@ -572,11 +572,13 @@ class Daemon:
             summary["plan"] = ({"position": [round(here[0], 5), round(here[1], 5)], "radius_km": radius, "far_sweeps_left_out": len(far)}
                                if here else {"position": None, "note": "no GPS fix: sweeps from every place count" if radius and not only else
                                              "plan_radius_km 0 or carriers given: sweeps from every place count"})
-            targets = targets_from_store(store, self.cfg, hits, only_freqs=only or None)
+            targets = targets_from_store(store, self.cfg, hits, only_freqs=only or None, near=here, radius_km=radius)
             if not targets:
                 summary["note"] = "no carriers to decode: run a survey first"
                 return
-            slices = plan(targets, self.cfg, max_instances, source.sample_rate)
+            # ordered for what is left of the budget: never-decoded carriers keep decode.new_share of it
+            left_s = None if spread else max(0.0, budget_s - (time.monotonic() - t0))
+            slices = plan(targets, self.cfg, max_instances, source.sample_rate, budget_s=left_s)
             rounds += 1
             for i, sl in enumerate(slices):
                 self._check(t0, budget_s)
