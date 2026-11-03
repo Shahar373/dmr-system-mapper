@@ -184,7 +184,11 @@ there. A sweep cut short by the end of the budget keeps what it heard (marked `p
 was heard. Carriers never decoded, strong, stale, or of a
 variant that announces its identity come first, and carriers that look like the same Capacity Plus
 site and fit in one 1.6 MHz slice (at 2 MS/s) are decoded together with a double dwell, because that is what
-produces rest-hop evidence. After a decode session the correlator runs. Closing the console never
+produces rest-hop evidence; once their `same_site` link is confirmed, or when one of them was silent at its
+last decode from around here, they are an ordinary refresh with a single dwell. Never-decoded carriers keep
+at least `decode.new_share` (0.4) of the decode budget, and every band with never-decoded hits gets its best
+slice before carriers already decoded are refreshed, so a stop's mapped sites cannot use the whole decode
+while new hits wait. After a decode session the correlator runs. Closing the console never
 stops a session. Development without hardware uses `sdr.source: file` (replay of an IQ recording)
 or the synthetic receiver in the tests.
 

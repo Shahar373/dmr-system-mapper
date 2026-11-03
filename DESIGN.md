@@ -108,9 +108,22 @@ receiver is shared with other SDR services on the Pi, so nothing runs on a timer
   more than `survey.plan_radius_km` (3) away are left out first (`summary.plan.far_sweeps_left_out`);
   runs without positions always count. Carriers already in the database are still targets wherever
   they were heard (30 days): a decode after a drive tries them once, and those with no DMR score low.
-  The scheduler scores targets (never decoded +3, staleness, SNR, identity-announcing
-  variant +1, explicitly requested +5) and picks slices greedily; carriers of one Cap+ site or
-  Tier III system that fit in one slice get a +2 group bonus and a double dwell. Per slice: retune,
+  The scheduler scores targets (never decoded +3, staleness up to +1 at 48 h, SNR up to +1 at 30 dB,
+  identity-announcing variant +1, no DMR in 30 s or more of decoding −3, explicitly requested +5) and
+  picks slices greedily. Carriers of one Cap+ site or Tier III system that fit in one slice get a +2
+  group bonus and a double dwell, because decoding them together is what produces rest-hop evidence;
+  but only a pair that can still add something: not two carriers already linked by a confirmed
+  `same_site` link (or both already in confirmed sites: the sites of one Tier III network share a group
+  key), and not a carrier whose last collector decode (20 s or more) parsed nothing. Such a silent decode
+  counts only if it was made within `survey.plan_radius_km` of the receiver now, by the GPS track at
+  the time; one with no track always counts. The slices are then ordered for the budget left
+  (`order_for_budget`): the best slice of each band with never-decoded hits comes before any slice of
+  carriers already decoded, and never-decoded slices keep at least `decode.new_share` (0.4) of the
+  budget (less when they need less); otherwise the better slice goes first. Field case 2026-11-03
+  (campaign decode, 613 s, 2 instances): the +2 bonus on four confirmed Tier III and Cap+ site pairs
+  (about 11 per slice against about 9 for a pair of never-decoded carriers at 10 to 16 dB) took four
+  double-dwell slices, and the VHF hits, all DMR, got only the last 13 s; `tests/test_decode_planning.py`
+  rebuilds it. Per slice: retune,
   FFT channelizer (overlap-save, sample_rate/D per channel: 80 kHz at 2 MS/s, 7.5 kHz low-pass, discriminator, rational resampling to 48 kHz int16,
   slow level normalisation), one PCM TCP server and one DSD-FME per carrier, stderr of all of them
   into one queue, parsed and written by the session thread, committed after every block so no
