@@ -40,7 +40,7 @@ def systems_report(store: Store, min_label: str = "possible") -> tuple[dict[str,
             for m in [x for x in members if x["site_id"] == si["id"]]:
                 lcn = f" LCN {m['lcn']}" if m["lcn"] else ""
                 out.append(f"    {m['freq_hz'] / 1e6:10.4f} MHz  {m['variant']:8s} cc={m['dominant_cc']}{lcn}"
-                           f"  last {datetime.fromtimestamp(m['last_seen'], tz=timezone.utc):%Y-%m-%d}")
+                           + (f"  last {datetime.fromtimestamp(m['last_seen'], tz=timezone.utc):%Y-%m-%d}" if m["last_seen"] else "  never heard"))
     out.append(f"links (>= {min_label}): {len(links)}")
     for l in links:
         t2 = "  Tier II only" if l["tier2_only"] else ""

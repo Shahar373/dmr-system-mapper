@@ -5,13 +5,13 @@ from __future__ import annotations
 
 from itertools import combinations
 
-from ..context import CarrierInfo, Context, format_site
+from ..context import CarrierInfo, Context, earliest, format_site
 from ..model import Evidence
 from ..scoring import ScoringConfig
 
 
 def _pair_ev(a: CarrierInfo, b: CarrierInfo, kind: str, etype: str, raw: float, details: dict) -> Evidence:
-    first = max(min(a.first_seen, b.first_seen), 0)
+    first = earliest(a.first_seen, b.first_seen)
     newest = min(a.last_seen_structural or a.last_seen, b.last_seen_structural or b.last_seen)
     return Evidence(a.freq_hz, b.freq_hz, kind, etype, raw, newest, first, 1, details).ordered()
 

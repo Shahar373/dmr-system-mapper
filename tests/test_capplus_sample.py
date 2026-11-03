@@ -72,9 +72,11 @@ def test_observations_and_identities(capplus_store):
     assert obs[-1]["rest_lsn_last"] in (3, 4, 5, 6)
     carrier = s.rows("SELECT * FROM carriers")[0]
     assert carrier["dominant_cc"] == 2 and carrier["variant"] == "capplus" and carrier["band"] == "vhf-high"
-    # H3: first/last seen follow the data, not the start time
-    assert carrier["first_seen"] == s.stats.first_ts and carrier["last_seen"] == s.stats.last_ts
-    assert carrier["last_seen"] - carrier["first_seen"] == 1006
+    # H3: first/last seen follow the data, not the start time; and only DMR: the log ends with a
+    # false D-STAR sync on noise at 16:50:30, which does not make the carrier heard
+    assert carrier["first_seen"] == s.stats.heard_first_ts == s.stats.first_ts
+    assert carrier["last_seen"] == s.stats.heard_last_ts < s.stats.last_ts
+    assert carrier["last_seen"] - carrier["first_seen"] == 854       # 16:33:44 .. 16:47:58, the last DMR burst
     ids = {(r["kind"], r["value"]) for r in s.rows("SELECT kind, value FROM identities")}
     # L10: TG 1 is a talkgroup, never a radio (DSD-FME writes TGT in Bank lines for group calls too)
     assert ("radio", 1) not in ids and ("tg", 1) in ids

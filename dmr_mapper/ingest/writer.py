@@ -46,6 +46,8 @@ class IngestStats:
     unrecognized_total: int = 0
     first_ts: int | None = None
     last_ts: int | None = None
+    heard_first_ts: int | None = None   # DMR heard: syncs, bursts and messages; not another protocol's sync
+    heard_last_ts: int | None = None
     bursts: Counter = field(default_factory=Counter)        # category -> count
     burst_kinds: Counter = field(default_factory=Counter)   # DSD-FME burst label -> count
     cc_histogram: Counter = field(default_factory=Counter)
@@ -128,11 +130,15 @@ class Aggregator:
         b = self._bucket(ts)
         b[key] = b.get(key, 0) + n
 
-    def _note_ts(self, ts: int | None) -> None:
+    def _note_ts(self, ts: int | None, dmr: bool = True) -> None:
         if ts is None:
             return
-        self.stats.first_ts = ts if self.stats.first_ts is None else min(self.stats.first_ts, ts)
-        self.stats.last_ts = ts if self.stats.last_ts is None else max(self.stats.last_ts, ts)
+        st = self.stats
+        st.first_ts = ts if st.first_ts is None else min(st.first_ts, ts)
+        st.last_ts = ts if st.last_ts is None else max(st.last_ts, ts)
+        if dmr:
+            st.heard_first_ts = ts if st.heard_first_ts is None else min(st.heard_first_ts, ts)
+            st.heard_last_ts = ts if st.heard_last_ts is None else max(st.heard_last_ts, ts)
 
     def _sight(self, kind: str, value: int, ts: int, role: str) -> None:
         if value <= 0:
@@ -170,7 +176,7 @@ class Aggregator:
     def feed(self, ev: Event) -> None:
         st = self.stats
         if isinstance(ev, Burst):
-            self._note_ts(ev.ts)
+            self._note_ts(ev.ts, dmr=ev.kind != "OTHER_PROTO")
             st.burst_kinds[ev.kind] += 1
             if ev.kind == "OTHER_PROTO":
                 st.bursts["other_proto"] += 1
@@ -321,8 +327,11 @@ class Aggregator:
         for kind, values in self._distinct_values.items():
             self.stats.identities[kind] = len(values)
         self.store.update_carrier_summary(self.carrier_id)
-        if self.stats.first_ts is not None:
-            self.store.upsert_carrier_seen(self.carrier_id, self.stats.first_ts, self.stats.last_ts or self.stats.first_ts)
+        if self.stats.heard_first_ts is not None:
+            # the carrier's seen range is when DMR was heard on it, never when it was listened to:
+            # a decode of noise (lines, no sync) or of another protocol leaves it as it was
+            self.store.upsert_carrier_seen(self.carrier_id, self.stats.heard_first_ts,
+                                           self.stats.heard_last_ts or self.stats.heard_first_ts)
         row = self.store.conn.execute("SELECT variant, variant_confidence FROM carriers WHERE id = ?", (self.carrier_id,)).fetchone()
         self.stats.variant, self.stats.variant_confidence = row["variant"], row["variant_confidence"]
         return self.stats

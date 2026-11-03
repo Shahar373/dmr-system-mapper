@@ -21,7 +21,7 @@ from typing import Any
 import networkx as nx
 
 from ..db import Store
-from .context import CarrierInfo, Context, format_site
+from .context import CarrierInfo, Context, earliest, format_site
 from .names import apply_names, site_anchor, system_anchor_for
 from .scoring import ScoringConfig
 
@@ -80,7 +80,7 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
         for s in sites:
             members = site_members[s]
             site_number, cc = _site_identity(ctx, members)
-            first = min(ctx.carriers[c].first_seen for c in members)
+            first = earliest(*(ctx.carriers[c].first_seen for c in members))
             last = max(ctx.carriers[c].last_seen for c in members)
             site_label = _site_label(ctx, members, variant, site_number)
             # Two same_site components of one system may announce the same site number (a carrier
@@ -89,7 +89,8 @@ def derive_sites_and_systems(store: Store, ctx: Context, cfg: ScoringConfig, now
             # the id of the previous insert when the conflict branch runs).
             row = store.conn.execute(
                 "INSERT INTO sites (system_id, site_number, label, cc, directly_observed, first_seen, last_seen, anchor) VALUES (?, ?, ?, ?, 1, ?, ?, ?)"
-                " ON CONFLICT(system_id, site_number) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = MIN(first_seen, excluded.first_seen)"
+                " ON CONFLICT(system_id, site_number) DO UPDATE SET last_seen = MAX(last_seen, excluded.last_seen), first_seen = CASE WHEN first_seen <= 0 THEN excluded.first_seen WHEN excluded.first_seen <= 0 THEN first_seen"
+                " ELSE MIN(first_seen, excluded.first_seen) END"
                 " RETURNING id",
                 (sys_id, site_number, site_label, cc, first, last, site_anchor(sys_anchor, variant, site_number))).fetchone()
             site_id = int(row[0])

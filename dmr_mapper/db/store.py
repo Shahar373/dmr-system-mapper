@@ -115,25 +115,33 @@ class Store:
         return current
 
     # -- carriers --------------------------------------------------------------------------
-    def upsert_carrier(self, freq_hz: int, seen_at: int, band: str | None = None) -> int:
+    def carrier_id(self, freq_hz: int, band: str | None = None) -> int:
+        """The id of the carrier on ``freq_hz``, created if new, without touching its seen range.
+
+        A new carrier is stored with ``first_seen = last_seen = 0`` ("never heard"): only RF evidence
+        (decoded DMR, a key-up) moves them, through ``upsert_carrier_seen``. Listening to a carrier
+        is not hearing it, so a decode or a log with no DMR in it must use this, not ``upsert_carrier``."""
         row = self.conn.execute("SELECT id FROM carriers WHERE freq_hz = ?", (freq_hz,)).fetchone()
         if row is None:
             cur = self.conn.execute(
-                "INSERT INTO carriers (freq_hz, band, first_seen, last_seen) VALUES (?, ?, ?, ?)",
-                (freq_hz, band, seen_at, seen_at),
-            )
+                "INSERT INTO carriers (freq_hz, band, first_seen, last_seen) VALUES (?, ?, 0, 0)", (freq_hz, band))
             return int(cur.lastrowid)
-        self.conn.execute(
-            "UPDATE carriers SET first_seen = MIN(first_seen, ?), last_seen = MAX(last_seen, ?),"
-            " band = COALESCE(band, ?) WHERE id = ?",
-            (seen_at, seen_at, band, row["id"]),
-        )
+        if band is not None:
+            self.conn.execute("UPDATE carriers SET band = COALESCE(band, ?) WHERE id = ?", (band, row["id"]))
         return int(row["id"])
 
+    def upsert_carrier(self, freq_hz: int, seen_at: int, band: str | None = None) -> int:
+        """The carrier on ``freq_hz``, heard at ``seen_at``: for RF evidence only (a key-up)."""
+        cid = self.carrier_id(freq_hz, band)
+        self.upsert_carrier_seen(cid, seen_at, seen_at)
+        return cid
+
     def upsert_carrier_seen(self, carrier_id: int, first_ts: int, last_ts: int) -> None:
+        """Widen the carrier's seen range to [first_ts, last_ts]; 0 is "never heard", not a time."""
         self.conn.execute(
-            "UPDATE carriers SET first_seen = MIN(first_seen, ?), last_seen = MAX(last_seen, ?) WHERE id = ?",
-            (first_ts, last_ts, carrier_id),
+            "UPDATE carriers SET first_seen = CASE WHEN first_seen <= 0 THEN ? ELSE MIN(first_seen, ?) END,"
+            " last_seen = MAX(last_seen, ?) WHERE id = ?",
+            (first_ts, first_ts, last_ts, carrier_id),
         )
 
     def update_carrier_summary(self, carrier_id: int) -> None:

@@ -70,7 +70,8 @@ def cmd_status(args: argparse.Namespace) -> int:
         print("carriers:")
         for c in store.carriers():
             print(f"  {c['freq_hz'] / 1e6:10.4f} MHz  cc={c['dominant_cc']}  variant={c['variant']} ({c['variant_confidence']:.2f})"
-                  f"  seen {datetime.fromtimestamp(c['first_seen'], tz=timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(c['last_seen'], tz=timezone.utc):%Y-%m-%d}")
+                  + (f"  seen {datetime.fromtimestamp(c['first_seen'], tz=timezone.utc):%Y-%m-%d} .. {datetime.fromtimestamp(c['last_seen'], tz=timezone.utc):%Y-%m-%d}"
+                     if c["last_seen"] else "  never heard (listened to, no DMR)"))
     return 0
 
 
@@ -246,6 +247,27 @@ def cmd_prune(args: argparse.Namespace) -> int:
     with _open_store(args, cfg) as store:
         out = prune(store, cfg)
     print("pruned: " + (", ".join(f"{k}={v}" for k, v in out.items()) or "nothing to prune"))
+    return 0
+
+
+def cmd_repair_seen(args: argparse.Namespace) -> int:
+    from .db.repair import repair_seen
+
+    cfg = load_config(args.config)
+
+    def day(ts: int) -> str:
+        return f"{datetime.fromtimestamp(ts, tz=timezone.utc):%Y-%m-%d %H:%M}" if ts else "never"
+
+    with _open_store(args, cfg) as store:
+        fixes = repair_seen(store, cfg, apply=not args.dry_run)
+    if args.json:
+        print(json.dumps({"applied": not args.dry_run, "carriers": [f.to_dict() for f in fixes]}, indent=2))
+        return 0
+    for f in fixes:
+        print(f"  {f.freq_hz / 1e6:10.4f} MHz  {day(f.old[0])} .. {day(f.old[1])}  ->  {day(f.new[0])} .. {day(f.new[1])}  ({f.note})")
+    verb = "would change" if args.dry_run else "changed"
+    print(f"{verb} {len(fixes)} carrier(s)" + ("" if args.dry_run or not fixes else
+          "; sites follow at the next `mapper correlate`, evidence dates with `mapper correlate --rebuild`"))
     return 0
 
 
@@ -791,6 +813,11 @@ def build_parser() -> argparse.ArgumentParser:
 
     pu = sub.add_parser("prune", help="delete radio IDs, talkgroups and their events older than retention.identity_days")
     pu.set_defaults(func=cmd_prune)
+
+    rs = sub.add_parser("repair-seen", help="one-off: recompute carriers' first/last seen from what was heard, not listened to")
+    rs.add_argument("--dry-run", action="store_true", help="show the changes, write nothing")
+    rs.add_argument("--json", action="store_true")
+    rs.set_defaults(func=cmd_repair_seen)
 
     sn = sub.add_parser("snapshot", help="consistent copy of the database for the archive (VACUUM INTO), keeps the newest N")
     sn.add_argument("--dir", help="default: paths.snapshots")

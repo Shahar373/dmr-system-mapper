@@ -27,7 +27,7 @@ import bisect
 import json
 from collections import defaultdict
 
-from ..context import Context
+from ..context import Context, earliest
 from ..model import Evidence
 from ..scoring import ScoringConfig
 
@@ -184,7 +184,7 @@ def own_grant_lcn(ctx: Context, cfg: ScoringConfig) -> list[Evidence]:
                 continue                            # same network and site, as both announce
             ev = Evidence(c.freq_hz, f.freq_hz, "same_site", "explicit_lcn_grant", 1.0,
                           max(c.last_seen_structural or c.last_seen, f.last_seen_structural or f.last_seen),
-                          min(c.first_seen, f.first_seen), n,
+                          earliest(c.first_seen, f.first_seen), n,
                           {"carrier": f.freq_hz, "lcn": lcn, "own_grants": n, "of": total, "control": c.freq_hz,
                            "control_grants_for_it": granted[lcn]}).ordered()
             ev.lcn_hints[f.freq_hz] = lcn

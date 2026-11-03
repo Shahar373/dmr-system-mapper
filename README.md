@@ -166,6 +166,8 @@ and `mapper` works from any folder. Exports and archive copies:
 ```sh
 mapper export --all              # map.html, map.json, map.graphml, systems.txt in var/exports/
 mapper snapshot                  # consistent copy of the database in var/snapshots/ (nightly by timer)
+mapper repair-seen --dry-run     # once, on a database from before 2026-11-03: carriers' seen range from
+                                 # what was heard, not when they were listened to (DESIGN.md §12)
 ```
 
 A decode session plans from the recent sweeps: every sweep of a band up to `survey.plan_window_minutes`
