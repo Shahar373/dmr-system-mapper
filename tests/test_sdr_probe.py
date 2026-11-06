@@ -46,13 +46,22 @@ def _fake_soapy(monkeypatch, found: list, open_raises: Exception | None = None):
     return opened
 
 
+def _here(cfg):
+    """A copy of the (session-wide) config that asks the driver in this process, where the fakes live."""
+    c = copy.deepcopy(cfg)
+    c["sdr"]["probe_in_subprocess"] = False
+    return c
+
+
 def test_probe_never_opens_the_device(monkeypatch, cfg):
+    cfg = _here(cfg)
     opened = _fake_soapy(monkeypatch, [{"driver": "sdrplay", "serial": "123"}])
     s = SoapyBackend(cfg).probe()
     assert s.status == "present" and s.serial == "123" and opened == []
 
 
 def test_plugged_in_but_hidden_by_the_driver_is_busy(monkeypatch, cfg):
+    cfg = _here(cfg)
     _fake_soapy(monkeypatch, [])
     monkeypatch.setattr(sdrmod, "usb_present", lambda c: True)
     s = SoapyBackend(cfg).probe()
@@ -123,6 +132,7 @@ def test_device_args_string():
 
 
 def test_free_receiver_has_no_holder_even_with_other_sdr_processes(monkeypatch, cfg):
+    cfg = _here(cfg)
     _fake_soapy(monkeypatch, [{"driver": "sdrplay", "serial": "240404AF60"}])
     monkeypatch.setattr(sdrmod, "sdr_users", lambda c: ["/usr/bin/python3 app.py (pid 7)"])
     s = SoapyBackend(cfg).probe()
@@ -163,3 +173,128 @@ def test_idle_loop_does_not_call_the_driver_every_tick(tmp_path, cfg):
     finally:
         d.stop_event.set()
         th.join(timeout=10)
+
+
+# -- the driver stays out of the daemon -------------------------------------------------------------
+FAKE_SOAPY_PKG = """
+import json, os
+print("SDRplay API banner on stdout")              # the real driver may print: must not confuse the parent
+open(os.environ["FAKE_SOAPY_MARK"], "a").write("loaded\\n")
+class Device:
+    @staticmethod
+    def enumerate(args):
+        if os.environ.get("FAKE_SOAPY_FAIL"):
+            raise RuntimeError("sdrplay_api_Open failed")
+        return [{"driver": args["driver"], "serial": "240404AF60", "label": "RSP1B"}]
+"""
+
+
+@pytest.fixture
+def child_soapy(tmp_path, monkeypatch):
+    d = tmp_path / "pkgs"
+    d.mkdir()
+    (d / "SoapySDR.py").write_text(FAKE_SOAPY_PKG)
+    mark = tmp_path / "mark"
+    monkeypatch.setenv("PYTHONPATH", str(d))
+    monkeypatch.setenv("FAKE_SOAPY_MARK", str(mark))
+    monkeypatch.delitem(sys.modules, "SoapySDR", raising=False)
+    return mark
+
+
+def test_probe_asks_the_driver_from_a_child_process(child_soapy, cfg):
+    b = SoapyBackend(cfg)
+    s = b.probe()
+    assert s.status == "present" and s.serial == "240404AF60"
+    assert child_soapy.read_text() == "loaded\n"               # loaded in the child ...
+    assert "SoapySDR" not in sys.modules and not b.driver_loaded  # ... never here
+
+
+def test_child_probe_reports_driver_errors_and_missing_bindings(child_soapy, monkeypatch, tmp_path, cfg):
+    monkeypatch.setenv("FAKE_SOAPY_FAIL", "1")
+    s = SoapyBackend(cfg).probe()
+    assert s.status == "error" and "sdrplay_api_Open failed" in (s.detail or "")
+    broken = tmp_path / "broken"
+    broken.mkdir()
+    (broken / "SoapySDR.py").write_text("raise ImportError('libSoapySDR.so.0.8: cannot open shared object file')\n")
+    monkeypatch.setenv("PYTHONPATH", str(broken))
+    s = SoapyBackend(cfg).probe()
+    assert s.status == "error" and "not importable" in (s.detail or "") and "libSoapySDR" in (s.detail or "")
+
+
+def test_child_probe_gives_up_on_a_hung_driver(child_soapy, monkeypatch, tmp_path, cfg):
+    hung = tmp_path / "hung"
+    hung.mkdir()
+    (hung / "SoapySDR.py").write_text("import time\ntime.sleep(30)\n")
+    monkeypatch.setenv("PYTHONPATH", str(hung))
+    cfg = copy.deepcopy(cfg)
+    cfg["sdr"]["probe_timeout_s"] = 1
+    t0 = time.monotonic()
+    s = SoapyBackend(cfg).probe()
+    assert s.status == "error" and "did not answer" in (s.detail or "") and time.monotonic() - t0 < 10
+
+
+class DriverBackend(SyntheticBackend):
+    """A synthetic receiver whose open() 'loads the driver', like SoapyBackend."""
+
+    def __init__(self):
+        super().__init__(SyntheticSource())
+        self.driver_loaded = False
+
+    def open(self):
+        self.driver_loaded = True
+        return super().open()
+
+
+def _idle_daemon(tmp_path, cfg, backend, release_s):
+    c = copy.deepcopy(cfg)
+    c["daemon"].update({"tick_s": 0.05, "release_driver_idle_s": release_s})
+    c["power"]["state_file"] = ""
+    return Daemon(tmp_path / "r.db", c, backend)
+
+
+def test_idle_daemon_restarts_once_a_session_loaded_the_driver(tmp_path, cfg):
+    b = DriverBackend()
+    d = _idle_daemon(tmp_path, cfg, b, 0.3)
+    th = threading.Thread(target=d.run, daemon=True)
+    th.start()
+    try:
+        time.sleep(0.6)
+        assert th.is_alive() and not d.restart_requested          # driver never loaded: stays up
+        b.driver_loaded = True                                     # as after a session
+        th.join(timeout=5)
+        assert not th.is_alive() and d.restart_requested
+        s = Store(tmp_path / "r.db")
+        try:
+            status = st.read_status(s)
+            assert status.alive and status.mode == "idle"         # not marked offline: it is back in a moment
+            assert "release the SDR driver" in (status.message or "")
+        finally:
+            s.close()
+    finally:
+        d.stop_event.set()
+        th.join(timeout=10)
+
+
+def test_no_restart_while_a_command_waits_or_when_disabled(tmp_path, cfg):
+    b = DriverBackend()
+    b.driver_loaded = True
+    d = _idle_daemon(tmp_path, cfg, b, 0.0)                        # 0 = never
+    th = threading.Thread(target=d.run, daemon=True)
+    th.start()
+    try:
+        time.sleep(0.5)
+        assert th.is_alive() and not d.restart_requested
+    finally:
+        d.stop_event.set()
+        th.join(timeout=10)
+    d2 = _idle_daemon(tmp_path, cfg, b, 0.2)
+    s = Store(tmp_path / "r.db")
+    try:
+        d2._store = s
+        d2._last_busy = time.monotonic() - 10
+        assert d2._should_release_driver(time.monotonic())
+        s.conn.execute("INSERT INTO commands (created, source, kind, params, status) VALUES (0, 'test', 'stop', '{}', 'pending')")
+        s.commit()
+        assert not d2._should_release_driver(time.monotonic())    # the queued command first
+    finally:
+        s.close()

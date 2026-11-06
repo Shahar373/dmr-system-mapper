@@ -5,7 +5,10 @@
 * a session (survey or decode) runs in a worker thread with a time budget and ends by itself;
 * the main loop keeps a heartbeat, serves the command queue, watches the power state and stops a
   session on undervoltage;
-* it is the single writer of decoded data (one ``Store`` per thread; SQLite WAL in between).
+* it is the single writer of decoded data (one ``Store`` per thread; SQLite WAL in between);
+* once a session has loaded the SDR driver into the process, it restarts itself (``exec``, same pid)
+  after ``daemon.release_driver_idle_s`` of idleness: SoapySDRPlay3 keeps the SDRplay API open until
+  the process exits, and the API's threads cost most of a core on the Pi while nothing is decoded.
 
 Clients never call into this module; they post rows to ``commands`` (see ``state.py``).
 """
@@ -18,6 +21,7 @@ import os
 import queue
 import signal
 import sqlite3
+import sys
 import threading
 import time
 import traceback
@@ -62,6 +66,9 @@ class Daemon:
         self.tick_s = float(dcfg.get("tick_s", 1))
         self.probe_interval_s = float(dcfg.get("sdr_probe_interval_s", 30))
         self.full_probe_interval_s = float(dcfg.get("sdr_full_probe_interval_s", 600))
+        self.release_driver_idle_s = float(dcfg.get("release_driver_idle_s", 60))
+        self.restart_requested = False           # run() returned to be exec'd again (see run_daemon)
+        self._last_busy = time.monotonic()
         self._last_full_probe = float("-inf")
         self.pid = os.getpid()
         self.started = int(time.time())
@@ -138,8 +145,14 @@ class Daemon:
                 self.session_thread.join(timeout=15)
             if self._job is not None and self._job.is_alive():
                 self._job.join(timeout=30)
-            st.mark_offline(self._store, self.pid)
-            log.info("daemon stopped")
+            if self.restart_requested:
+                # not offline: the same pid is back within a few seconds, inside heartbeat_stale_s
+                st.write_heartbeat(self._store, self.pid, self.started, "idle", None, self.sdr.to_dict(), self.power.to_dict(),
+                                   {}, self.message)
+                log.info("restarting to release the SDR driver")
+            else:
+                st.mark_offline(self._store, self.pid)
+                log.info("daemon stopped")
         finally:
             self._store.close()
             self._release_lock()
@@ -147,6 +160,7 @@ class Daemon:
 
     def _install_signals(self) -> None:
         def _stop(signum: int, frame: Any) -> None:
+            self.restart_requested = False     # systemd's stop wins over a pending self-restart
             self.stop_event.set()
         for sig in (signal.SIGTERM, signal.SIGINT):
             try:
@@ -177,6 +191,10 @@ class Daemon:
             if now - self._last_probe >= self.probe_interval_s:
                 self._idle_probe(now)
                 self._last_probe = now
+        else:
+            self._last_busy = now
+        if self._job is not None and self._job.is_alive():
+            self._last_busy = now
         for _ in range(5):
             cmd = st.take_command(self._store)
             if cmd is None:
@@ -186,6 +204,7 @@ class Daemon:
             except Exception as exc:  # noqa: BLE001 - a bad command must not kill the daemon
                 res = (False, f"{type(exc).__name__}: {exc}")
                 log.exception("command %s failed", cmd["kind"])
+            self._last_busy = now
             if res is None:
                 continue                      # a worker finishes it
             ok, result = res
@@ -199,6 +218,21 @@ class Daemon:
             progress = dict(self.progress)
         st.write_heartbeat(self._store, self.pid, self.started, self.mode, self.session_id, self.sdr.to_dict(), self.power.to_dict(),
                            progress, self.message)
+        if self._should_release_driver(now):
+            self.restart_requested = True
+            self.message = "restarting to release the SDR driver (idle)"
+            self.stop_event.set()
+
+    def _should_release_driver(self, now: float) -> bool:
+        """Idle for ``release_driver_idle_s`` with the SDR driver loaded and nothing queued."""
+        if self.release_driver_idle_s <= 0 or not getattr(self.backend, "driver_loaded", False):
+            return False
+        if now - self._last_busy < self.release_driver_idle_s:
+            return False
+        if (self.session_thread is not None and self.session_thread.is_alive()) or (self._job is not None and self._job.is_alive()):
+            return False
+        assert self._store is not None
+        return self._store.conn.execute("SELECT 1 FROM commands WHERE status = 'pending' LIMIT 1").fetchone() is None
 
     def _idle_probe(self, now: float) -> None:
         """While idle, only look at whether the receiver is plugged in (no driver call): asking the
@@ -928,4 +962,21 @@ class Daemon:
 
 
 def run_daemon(db_path: str | Path, cfg: dict[str, Any], backend: Backend | None = None) -> int:
-    return Daemon(db_path, cfg, backend).run()
+    d = Daemon(db_path, cfg, backend)
+    rc = d.run()
+    if d.restart_requested:
+        _reexec()
+    return rc
+
+
+def _reexec() -> None:
+    """Replace this process with a fresh copy of itself (same pid, same arguments): the only way
+    to unload the SDR driver. The lock file is released by run() and the database is closed."""
+    for h in logging.getLogger().handlers:
+        try:
+            h.flush()
+        except Exception:  # noqa: BLE001
+            pass
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os.execv(sys.executable, [sys.executable, *sys.orig_argv[1:]])
