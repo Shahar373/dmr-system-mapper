@@ -26,6 +26,9 @@ sdr:
     ifgr: 40                   # IF gain reduction (dB)
     lna_state: 3               # RFGR / LNA state
     agc: false
+  probe_in_subprocess: true    # ask the driver from a short-lived child process, so the idle daemon never loads it
+                               # (SoapySDRPlay3 keeps the SDRplay API open, and busy, until the process exits)
+  probe_timeout_s: 20          # give up on a driver that does not answer
   usb_vendor: "1df7"           # USB vendor id of the receiver (1df7 = SDRplay); tells "not plugged in" from "in use"
   known_users:                 # program or script names (exact) of SDR users run by OTHER Linux users,
                                # whose /proc maps we cannot read; our own user's are found by their libraries
@@ -94,6 +97,8 @@ daemon:
   default_budget_min: 60       # session length on mains when the client gives none
   sdr_probe_interval_s: 30     # how often an idle daemon checks that the receiver is plugged in (USB only, no driver call)
   sdr_full_probe_interval_s: 600   # how often it asks the driver whether the receiver is free (always before a session)
+  release_driver_idle_s: 60    # after a session, restart the daemon (same pid) once idle this long, to unload the SDR
+                               # driver: loaded, the SDRplay API costs most of a core on the Pi. 0 = never
   survey_hits_keep_days: 14    # prune survey_hits older than this at the end of a session
   correlate_after_decode: true # run the evidence engine when a decode session ends
 

@@ -13,8 +13,11 @@ only ever talks to a backend, so tests inject a synthetic one.
 
 from __future__ import annotations
 
+import json
 import os
 import re
+import subprocess
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -333,6 +336,8 @@ class SoapyBackend:
         self.driver = str(scfg.get("driver", "sdrplay"))
         devs = scfg.get("devices") or [{}]
         self.serial = str((devs[0] or {}).get("serial") or "")
+        # True once this process has loaded the SDR driver: the daemon then restarts itself when idle
+        self.driver_loaded = False
 
     def _args(self) -> dict[str, str]:
         args = {"driver": self.driver}
@@ -343,14 +348,20 @@ class SoapyBackend:
     def probe(self) -> SdrStatus:
         """Non-invasive check: never opens the device. Opening it, even for a moment, could make a
         program that starts at that instant fail, and the receiver is shared. The device is opened
-        only when a session starts (``open``)."""
+        only when a session starts (``open``).
+
+        The driver is asked from a short-lived child process (``sdr.probe_in_subprocess``): once
+        SoapySDRPlay3 is loaded it keeps the SDRplay API open until the process exits, and the API's
+        threads cost the idle daemon most of a core on the Pi."""
         now = int(time.time())
+        scfg = self.cfg.get("sdr", {}) or {}
         try:
-            import SoapySDR  # type: ignore[import-not-found]
+            if scfg.get("probe_in_subprocess", True):
+                found = enumerate_isolated(self._args(), float(scfg.get("probe_timeout_s", 20)))
+            else:
+                found = self._enumerate_here()
         except ImportError as exc:
             return SdrStatus("error", self.driver, None, None, f"SoapySDR python bindings not importable: {exc}", now)
-        try:
-            found = SoapySDR.Device.enumerate(self._args())
         except Exception as exc:  # noqa: BLE001 - driver errors are strings
             return SdrStatus("error", self.driver, None, None, f"enumerate failed: {exc}"[:200], now)
         if found:
@@ -366,6 +377,12 @@ class SoapyBackend:
                              "connected, but the driver does not offer it: another program is using it", now)
         return SdrStatus("absent", self.driver, self.serial or None, None, None, now)
 
+    def _enumerate_here(self) -> list[dict[str, str]]:
+        import SoapySDR  # type: ignore[import-not-found]
+
+        self.driver_loaded = True
+        return [dict(f) for f in SoapySDR.Device.enumerate(self._args())]
+
     def connected(self) -> bool | None:
         """Light check for the idle loop: is the receiver plugged in (sysfs only, no driver call)."""
         return usb_present(self.cfg)
@@ -375,6 +392,7 @@ class SoapyBackend:
         a bare ``driver=sdrplay`` can fail to match on some SoapySDRPlay builds."""
         import SoapySDR  # type: ignore[import-not-found]
 
+        self.driver_loaded = True     # from here on the API stays open in this process (see probe)
         found = [dict(f) for f in SoapySDR.Device.enumerate(self._args())]
         if not found:
             users = sdr_users(self.cfg)
@@ -387,6 +405,36 @@ class SoapyBackend:
             except Exception as exc:  # noqa: BLE001
                 last = exc
         raise RuntimeError(f"{last} (tried {found})")
+
+
+_ENUMERATE_CHILD = """
+import json, sys
+try:
+    import SoapySDR
+except ImportError as exc:
+    print("@@import " + json.dumps(str(exc)))
+    sys.exit(0)
+found = [dict(f) for f in SoapySDR.Device.enumerate(json.loads(sys.argv[1]))]
+print("@@found " + json.dumps(found))
+"""
+
+
+def enumerate_isolated(args: dict[str, str], timeout_s: float = 20.0) -> list[dict[str, str]]:
+    """``SoapySDR.Device.enumerate(args)`` in a child process, so that the SDR driver is never loaded
+    into the caller. Raises ImportError when the bindings are missing, RuntimeError otherwise. The
+    driver and the SDRplay API may print on stdout: only the line marked ``@@`` is the answer."""
+    try:
+        proc = subprocess.run([sys.executable, "-c", _ENUMERATE_CHILD, json.dumps(args)],
+                              capture_output=True, text=True, timeout=timeout_s, stdin=subprocess.DEVNULL)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError(f"the driver did not answer within {timeout_s:g} s") from None
+    for line in reversed(proc.stdout.splitlines()):
+        if line.startswith("@@found "):
+            return [{str(k): str(v) for k, v in d.items()} for d in json.loads(line[8:])]
+        if line.startswith("@@import "):
+            raise ImportError(json.loads(line[9:]))
+    tail = (proc.stderr.strip().splitlines() or [f"exit status {proc.returncode}"])[-1]
+    raise RuntimeError(tail)
 
 
 SDR_LIBRARIES = ("libsdrplay_api", "libsdrPlaySupport", "librtlsdr", "libairspy", "libhackrf")

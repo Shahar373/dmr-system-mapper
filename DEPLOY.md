@@ -59,6 +59,13 @@ mapper doctor                     # everything at once, including the service an
 Closing the console never stops a session; sessions end by their time budget, by `x`, or on
 undervoltage.
 
+While idle the daemon should use next to no CPU. It never loads the SDR driver for its periodic
+receiver check (that runs in a short-lived child process, `sdr.probe_in_subprocess`), and a session
+does load it: SoapySDRPlay3 then keeps the SDRplay API open, and busy, until the process exits. So
+a minute after the last session (`daemon.release_driver_idle_s`) the daemon restarts itself in
+place (same pid; the journal says `restarting to release the SDR driver`). `top -H -p $(pgrep -f
+'mapper daemon')` shows which thread is using CPU if it ever does again.
+
 `mapper survey|decode|watch|campaign --no-wait` returns at once, and closing the terminal ends a
 `--wait` follower but not the session: `mapper session` shows what it did afterwards, the summary the
 follower prints at the end, in full (per-sweep seconds, `sweeps_note`, `then_decode_s`, the decode
